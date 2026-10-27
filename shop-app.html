@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+    <meta charset="UTF-8">
+    <title>Fair Delivery - Merchant App</title>
+    <link rel="stylesheet" href="https://cloudflare.com">
+    <style>
+        body { background-color: #050b11; color: white; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        .tablet-container { width: 800px; height: 500px; background-color: #0c1622; border: 12px solid #1e293b; border-radius: 24px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+        .shop-header { background-color: #111d27; padding: 15px 25px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #1e293b; }
+        .shop-header h2 { margin: 0; font-size: 20px; color: #00e676; }
+        .main-content { flex: 1; display: flex; overflow: hidden; }
+        .orders-sidebar { width: 300px; background-color: #09121c; border-right: 1px solid #1e293b; padding: 15px; }
+        .order-item { background-color: #111d27; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; }
+        .order-details-panel { flex: 1; padding: 25px; display: flex; flex-direction: column; justify-content: space-between; }
+        .items-list { flex: 1; font-size: 16px; }
+        .action-zone { display: flex; gap: 15px; }
+        .btn-action { flex: 1; padding: 15px; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; }
+        .btn-accept { background-color: #00f2fe; color: #050b11; }
+        .btn-ready { background-color: #00e676; color: #050b11; display: none; }
+        .btn-call { background-color: #eab308; color: #050b11; display: none; }
+    </style>
+</head>
+<body>
+    <div class="tablet-container">
+        <div class="shop-header">
+            <h2><i class="fa-solid fa-store"></i> Γύρος House (Merchant Panel)</h2>
+            <div style="color: #00e676; font-weight: bold;">ΑΝΟΙΧΤΟ</div>
+        </div>
+        <div class="main-content">
+            <div class="orders-sidebar">
+                <div class="order-item">
+                    <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>#1042 - Γιάννης Π.</span><span>14.50€</span></div>
+                    <div id="sidebarStatus" style="font-size:12px; color:#94a3b8; margin-top:5px;">Νέα Παραγγελία</div>
+                </div>
+            </div>
+            <div class="order-details-panel">
+                <div class="items-list">
+                    <h3>Παραγγελία #1042</h3>
+                    <p style="color:#94a3b8;">2x Πίτα Γύρος Χοιρινός<br>1x Πατάτες Τηγανητές<br>1x Coca Cola</p>
+                </div>
+                <div class="action-zone">
+                    <button class="btn-action btn-accept" id="btnAccept" onclick="updateOrder('Ετοιμάζεται')">ΑΠΟΔΟΧΗ ΠΑΡΑΓΓΕΛΙΑΣ</button>
+                    <button class="btn-action btn-ready" id="btnReady" onclick="updateOrder('Έτοιμη')">ΕΤΟΙΜΑΣΙΑ ΦΑΓΗΤΟΥ</button>
+                    <button class="btn-action btn-call" id="btnCall" onclick="updateOrder('Αναζήτηση Rider')">ΚΛΗΣΗ ΔΙΑΝΟΜΕΑ</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        function updateOrder(newStatus) {
+            fetch('http://localhost:3000/api/order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: newStatus })
+            }).then(() => {
+                document.getElementById('sidebarStatus').innerText = newStatus;
+                if(newStatus === 'Ετοιμάζεται') {
+                    document.getElementById('btnAccept').style.display = 'none';
+                    document.getElementById('btnReady').style.display = 'block';
+                } else if(newStatus === 'Έτοιμη') {
+                    document.getElementById('btnReady').style.display = 'none';
+                    document.getElementById('btnCall').style.display = 'block';
+                } else if(newStatus === 'Αναζήτηση Rider') {
+                    document.getElementById('btnCall').disabled = true;
+                    document.getElementById('btnCall').innerText = "ΑΝΑΖΗΤΗΣΗ...";
+                    checkRiderStatus();
+                }
+            });
+        }
+
+        function checkRiderStatus() {
+            setInterval(() => {
+                fetch('http://localhost:3000/api/order')
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('sidebarStatus').innerText = data.status;
+                    if(data.status === 'Σε εξέλιξη') {
+                        document.getElementById('btnCall').innerText = "Ο RIDER ΠΑΡΕΛΑΒΕ";
+                        document.getElementById('btnCall').style.backgroundColor = "#111d27";
+                        document.getElementById('btnCall').style.color = "#94a3b8";
+                    } else if(data.status === 'Παραδόθηκε') {
+                        document.getElementById('sidebarStatus').innerText = "Ολοκληρώθηκε";
+                        document.getElementById('btnCall').innerText = "ΠΑΡΑΔΟΘΗΚΕ";
+                    }
+                });
+            }, 1000);
+        }
+    </script>
+</body>
+</html>

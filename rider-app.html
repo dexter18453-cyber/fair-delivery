@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+    <meta charset="UTF-8">
+    <title>Fair Delivery - Rider App</title>
+    <link rel="stylesheet" href="https://cloudflare.com">
+    <link rel="stylesheet" href="https://unpkg.com" />
+    <style>
+        body { background-color: #050b11; color: white; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        .phone-container { width: 360px; height: 740px; background-color: #0c1622; border: 12px solid #1e293b; border-radius: 36px; overflow: hidden; display: flex; flex-direction: column; position: relative; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+        .app-header { background-color: #111d27; padding: 15px; text-align: center; border-bottom: 1px solid #1e293b; z-index: 1001; }
+        .main-screen { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; position: relative; height: calc(100% - 50px); }
+        .status-btn { background-color: #ef4444; color: white; border: none; padding: 15px 40px; border-radius: 30px; font-size: 16px; font-weight: bold; cursor: pointer; z-index: 1000; }
+        .status-btn.online { background-color: #00e676; color: #050b11; }
+        .order-card { background-color: #172635; border: 2px solid #00f2fe; border-radius: 16px; padding: 20px; width: 90%; display: none; position: absolute; bottom: 20px; z-index: 2000; box-shadow: 0 10px 25px rgba(0,0,0,0.5); box-sizing: border-box; }
+        .accept-btn { background-color: #00f2fe; color: #050b11; border: none; padding: 12px 25px; border-radius: 8px; font-weight: bold; width: 100%; cursor: pointer; margin-top:10px; }
+        #map { width: 100%; height: 100%; position: absolute; top: 0; left: 0; display: none; z-index: 1; }
+    </style>
+</head>
+<body>
+    <div class="phone-container">
+        <div class="app-header"><h2><i class="fa-solid fa-motorcycle"></i> Fair Rider</h2></div>
+        <div class="main-screen">
+            <div id="map"></div>
+            <button class="status-btn" id="toggleBtn" onclick="toggleStatus()">GO ONLINE</button>
+            <p id="statusText" style="margin-top:15px; color:#94a3b8; z-index: 1000;">Είστε Offline.</p>
+            
+            <div class="order-card" id="orderCard">
+                <h3 style="color:#00e676; margin:0 0 10px 0;">ΝΕΑ ΠΑΡΑΓΓΕΛΙΑ!</h3>
+                <p style="font-size:14px; color:#94a3b8; text-align:left; margin:0;"><strong>Από:</strong> Γύρος House<br><strong>Προς:</strong> Νίκαια, Κέντρο<br><strong>Αμοιβή:</strong> 5.00€ 🌧️</p>
+                <button class="accept-btn" id="actionBtn" onclick="acceptOrder()">ΑΠΟΔΟΧΗ</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com"></script>
+    <script>
+        let isOnline = false, checkInterval, map, riderMarker;
+        let shopLat = 37.966, shopLng = 23.645;
+        let riderLat = 37.960, riderLng = 23.638;
+
+        function toggleStatus() {
+            isOnline = !isOnline;
+            const btn = document.getElementById('toggleBtn');
+            const txt = document.getElementById('statusText');
+            if(isOnline) {
+                btn.innerText = "GO OFFLINE"; btn.classList.add('online');
+                txt.innerText = "Αναμονή για σήμα από τον server...";
+                startCheckingServer();
+            } else {
+                btn.innerText = "GO ONLINE"; btn.classList.remove('online');
+                txt.innerText = "Είστε Offline.";
+                clearInterval(checkInterval);
+                document.getElementById('orderCard').style.display = 'none';
+                document.getElementById('map').style.display = 'none';
+            }
+        }
+
+        function startCheckingServer() {
+            checkInterval = setInterval(() => {
+                fetch('http://localhost:3000/api/order')
+                .then(res => res.json())
+                .then(data => {
+                    if(data.status === 'Αναζήτηση Rider') {
+                        document.getElementById('toggleBtn').style.display = 'none';
+                        document.getElementById('statusText').style.display = 'none';
+                        document.getElementById('orderCard').style.display = 'block';
+                        initMap();
+                    }
+                });
+            }, 1000);
+        }
+
+        function initMap() {
+            document.getElementById('map').style.display = 'block';
+            if (!map) {
+                map = L.map('map').setView([shopLat, shopLng], 14);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                L.marker([shopLat, shopLng]).addTo(map).bindPopup('Γύρος House').openPopup();
+                riderMarker = L.marker([riderLat, riderLng]).addTo(map).bindPopup('Εσείς');
+            }
+            map.invalidateSize();
+        }
+
+        function acceptOrder() {
+            fetch('http://localhost:3000/api/order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: 'Σε εξέλιξη' })
+            }).then(() => {
+                const btn = document.getElementById('actionBtn');
+                btn.innerText = "ΠΑΡΑΔΟΘΗΚΕ";
+                btn.style.backgroundColor = "#00e676";
+                btn.setAttribute("onclick", "completeOrder()");
+                simulateRiderMovement();
+            });
+        }
+
+        function simulateRiderMovement() {
+            let steps = 0;
+            let moveInterval = setInterval(() => {
+                steps++;
+                riderLat += (shopLat - riderLat) * 0.25;
+                riderLng += (shopLng - riderLng) * 0.25;
+                riderMarker.setLatLng([riderLat, riderLng]);
+                
+                fetch('http://localhost:3000/api/order', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: 'Σε εξέλιξη', lat: riderLat, lng: riderLng })
+                });
+
+                if(steps >= 12) {
+                    clearInterval(moveInterval);
+                    riderMarker.bindPopup('Φτάσατε στο κατάστημα!').openPopup();
+                }
+            }, 1200);
+        }
+
+        function completeOrder() {
+            fetch('http://localhost:3000/api/order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: 'Παραδόθηκε' })
+            }).then(() => {
+                alert("Η παράδοση ολοκληρώθηκε! Έβγαλες 5.00€!");
+                location.reload();
+            });
+        }
+    </script>
+</body>
+</html>

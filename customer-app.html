@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+    <meta charset="UTF-8">
+    <title>Fair Delivery - Customer App</title>
+    <link rel="stylesheet" href="https://cloudflare.com">
+    <link rel="stylesheet" href="https://unpkg.com" />
+    <style>
+        body { background-color: #050b11; color: white; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        .phone-container { width: 360px; height: 740px; background-color: #0c1622; border: 12px solid #1e293b; border-radius: 36px; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+        .app-header { background-color: #111d27; padding: 15px; text-align: center; border-bottom: 1px solid #1e293b; }
+        .app-header h2 { margin:0; color:#00f2fe; font-size:18px; }
+        .menu-content { flex: 1; padding: 20px; overflow-y: auto; }
+        .menu-item { background: #172635; border: 1px solid #1e293b; border-radius: 12px; padding: 15px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
+        .btn-add { background: #00e676; color: #050b11; border: none; padding: 8px 12px; border-radius: 20px; font-weight: bold; cursor: pointer; }
+        .cart-panel { background: #111d27; padding: 20px; border-top: 1px solid #1e293b; text-align: center; }
+        .btn-order { background: #00f2fe; color: #050b11; border: none; padding: 15px; border-radius: 8px; font-size: 16px; font-weight: bold; width: 100%; cursor: pointer; }
+        .status-screen { display: none; flex: 1; flex-direction: column; height: calc(100% - 50px); }
+        #map { width: 100%; height: 60%; background: #050b11; }
+        .status-info { height: 40%; background: #111d27; padding: 20px; box-sizing: border-box; text-align: center; border-top: 2px solid #1e293b; }
+    </style>
+</head>
+<body>
+    <div class="phone-container">
+        <div class="app-header"><h2><i class="fa-solid fa-basket-shopping"></i> Γύρος House</h2></div>
+        
+        <div class="menu-content" id="menuScreen">
+            <div class="menu-item">
+                <div><h4>Πίτα Γύρος Χοιρινός</h4><p style="color:#94a3b8; font-size:14px; margin:5px 0 0 0;">3.80€</p></div>
+                <button class="btn-add" onclick="addToCart('Πίτα Γύρος Χοιρινός', 3.80)">+ Προσθήκη</button>
+            </div>
+            <div class="menu-item">
+                <div><h4>Πατάτες Τηγανητές</h4><p style="color:#94a3b8; font-size:14px; margin:5px 0 0 0;">3.40€</p></div>
+                <button class="btn-add" onclick="addToCart('Πατάτες Τηγανητές', 3.40)">+ Προσθήκη</button>
+            </div>
+        </div>
+
+        <div class="cart-panel" id="cartPanel">
+            <div style="display:flex; justify-content:space-between; margin-bottom:15px; font-weight:bold;">
+                <span>Σύνολο:</span><span id="cartTotal">0.00€</span>
+            </div>
+            <button class="btn-order" onclick="sendOrder()">ΑΠΟΣΤΟΛΗ ΠΑΡΑΓΓΕΛΙΑΣ</button>
+        </div>
+
+        <div class="status-screen" id="statusScreen">
+            <div id="map"></div>
+            <div class="status-info">
+                <i class="fa-solid fa-circle-notch fa-spin" id="statusIcon" style="font-size: 2.5rem; color: #00f2fe; margin-bottom: 10px;"></i>
+                <h4 id="liveStatus" style="margin:5px 0;">Αναμονή για αποδοχή...</h4>
+                <p style="color:#94a3b8; font-size:13px; margin:5px 0 0 0;">Παραγγελία #1042</p>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com"></script>
+    <script>
+        let total = 0, map, riderMarker;
+        let shopLat = 37.966, shopLng = 23.645;
+
+        function addToCart(item, price) {
+            total += price;
+            document.getElementById('cartTotal').innerText = total.toFixed(2) + "€";
+        }
+
+        function sendOrder() {
+            if(total === 0) return alert("Το καλάθι είναι άδειο!");
+            fetch('http://localhost:3000/api/order', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: 'Νέα Παραγγελία' })
+            }).then(() => {
+                document.getElementById('menuScreen').style.display = 'none';
+                document.getElementById('cartPanel').style.display = 'none';
+                document.getElementById('statusScreen').style.display = 'flex';
+                initCustomerMap();
+                trackLiveStatus();
+            });
+        }
+
+        function initCustomerMap() {
+            setTimeout(() => {
+                map = L.map('map').setView([shopLat, shopLng], 14);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                L.marker([shopLat, shopLng]).addTo(map).bindPopup('Γύρος House').openPopup();
+                map.invalidateSize();
+            }, 200);
+        }
+
+        function trackLiveStatus() {
+            setInterval(() => {
+                fetch('http://localhost:3000/api/order')
+                .then(res => res.json())
+                .then(data => {
+                    const statusText = document.getElementById('liveStatus');
+                    const icon = document.getElementById('statusIcon');
+                    
+                    if(data.status === 'Ετοιμάζεται') {
+                        statusText.innerText = "🍔 Το μαγαζί ετοιμάζει το φαγητό σου!";
+                        statusText.style.color = "#eab308";
+                    } else if(data.status === 'Αναζήτηση Rider') {
+                        statusText.innerText = "🛵 Ψάχνουμε διανομέα στην περιοχή...";
+                        statusText.style.color = "#00f2fe";
+                    } else if(data.status === 'Σε εξέλιξη') {
+                        statusText.innerText = "🚀 Ο διανομέας έρχεται live!";
+                        statusText.style.color = "#00e676";
+                        icon.className = "fa-solid fa-motorcycle";
+                        icon.style.color = "#00e676";
+                        
+                        if(data.lat && data.lng) {
+                            if(!riderMarker) {
+                                riderMarker = L.marker([data.lat, data.lng]).addTo(map).bindPopup('Ο Διανομέας σου').openPopup();
+                            } else {
+                                riderMarker.setLatLng([data.lat, data.lng]);
+                            }
+                        }
+                    } else if(data.status === 'Παραδόθηκε') {
+                        statusText.innerText = "✅ Παραδόθηκε! Καλή όρεξη!";
+                        statusText.style.color = "#00e676";
+                        icon.className = "fa-solid fa-circle-check";
+                    }
+                });
+            }, 1000);
+        }
+    </script>
+</body>
+</html>
