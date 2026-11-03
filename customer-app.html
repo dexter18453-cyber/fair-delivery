@@ -22,16 +22,12 @@
 </head>
 <body>
     <div class="phone-container">
-        <div class="app-header"><h2><i class="fa-solid fa-basket-shopping"></i> Γύρος House</h2></div>
+        <div class="app-header"><h2><i class="fa-solid fa-utensils"></i> Ο Στέλιος (Κερατσίνι)</h2></div>
         
         <div class="menu-content" id="menuScreen">
             <div class="menu-item">
-                <div><h4>Πίτα Γύρος Χοιρινός</h4><p style="color:#94a3b8; font-size:14px; margin:5px 0 0 0;">3.80€</p></div>
-                <button class="btn-add" onclick="addToCart('Πίτα Γύρος Χοιρινός', 3.80)">+ Προσθήκη</button>
-            </div>
-            <div class="menu-item">
-                <div><h4>Πατάτες Τηγανητές</h4><p style="color:#94a3b8; font-size:14px; margin:5px 0 0 0;">3.40€</p></div>
-                <button class="btn-add" onclick="addToCart('Πατάτες Τηγανητές', 3.40)">+ Προσθήκη</button>
+                <div><h4>Σουβλάκι με το Μέτρο Χοιρινό</h4><p style="color:#00f2fe; font-weight:bold; margin:5px 0 0 0;">8.50€</p></div>
+                <button class="btn-add" onclick="addToCart(8.50)">+ Προσθήκη</button>
             </div>
         </div>
 
@@ -57,7 +53,7 @@
         let total = 0, map, riderMarker;
         let shopLat = 37.966, shopLng = 23.645;
 
-        function addToCart(item, price) {
+        function addToCart(price) {
             total += price;
             document.getElementById('cartTotal').innerText = total.toFixed(2) + "€";
         }
@@ -81,26 +77,20 @@
             setTimeout(() => {
                 map = L.map('map').setView([shopLat, shopLng], 14);
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-                L.marker([shopLat, shopLng]).addTo(map).bindPopup('Γύρος House').openPopup();
+                L.marker([shopLat, shopLng]).addTo(map).bindPopup('Ο Στέλιος').openPopup();
                 map.invalidateSize();
             }, 200);
         }
 
         function trackLiveStatus() {
             setInterval(() => {
-                https://fair-delivery.onrender.com
+                fetch('http://localhost:3000/api/order')
                 .then(res => res.json())
                 .then(data => {
                     const statusText = document.getElementById('liveStatus');
                     const icon = document.getElementById('statusIcon');
                     
-                    if(data.status === 'Ετοιμάζεται') {
-                        statusText.innerText = "🍔 Το μαγαζί ετοιμάζει το φαγητό σου!";
-                        statusText.style.color = "#eab308";
-                    } else if(data.status === 'Αναζήτηση Rider') {
-                        statusText.innerText = "🛵 Ψάχνουμε διανομέα στην περιοχή...";
-                        statusText.style.color = "#00f2fe";
-                    } else if(data.status === 'Σε εξέλιξη') {
+                    if(data.status === 'Σε εξέλιξη') {
                         statusText.innerText = "🚀 Ο διανομέας έρχεται live!";
                         statusText.style.color = "#00e676";
                         icon.className = "fa-solid fa-motorcycle";
@@ -119,7 +109,7 @@
                         icon.className = "fa-solid fa-circle-check";
                     }
                 });
-            }, 1000);
+            }, 1500);
         }
     </script>
 </body>
