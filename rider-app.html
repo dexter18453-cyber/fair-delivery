@@ -27,7 +27,7 @@
             
             <div class="order-card" id="orderCard">
                 <h3 style="color:#00e676; margin:0 0 10px 0;">ΝΕΑ ΠΑΡΑΓΓΕΛΙΑ!</h3>
-                <p style="font-size:14px; color:#94a3b8; text-align:left; margin:0;"><strong>Από:</strong> Γύρος House<br><strong>Προς:</strong> Νίκαια, Κέντρο<br><strong>Αμοιβή:</strong> 5.00€ 🌧️</p>
+                <p style="font-size:14px; color:#94a3b8; text-align:left; margin:0;"><strong>Από:</strong> Ο Στέλιος<br><strong>Αμοιβή:</strong> 4.26€ 🛵</p>
                 <button class="accept-btn" id="actionBtn" onclick="acceptOrder()">ΑΠΟΔΟΧΗ</button>
             </div>
         </div>
@@ -45,7 +45,7 @@
             const txt = document.getElementById('statusText');
             if(isOnline) {
                 btn.innerText = "GO OFFLINE"; btn.classList.add('online');
-                txt.innerText = "Αναμονή για σήμα από τον server...";
+                txt.innerText = "Αναμονή για σήμα...";
                 startCheckingServer();
             } else {
                 btn.innerText = "GO ONLINE"; btn.classList.remove('online');
@@ -58,7 +58,7 @@
 
         function startCheckingServer() {
             checkInterval = setInterval(() => {
-                https://fair-delivery.onrender.com
+                fetch('http://localhost:3000/api/order')
                 .then(res => res.json())
                 .then(data => {
                     if(data.status === 'Αναζήτηση Rider') {
@@ -68,7 +68,7 @@
                         initMap();
                     }
                 });
-            }, 1000);
+            }, 1500);
         }
 
         function initMap() {
@@ -76,7 +76,7 @@
             if (!map) {
                 map = L.map('map').setView([shopLat, shopLng], 14);
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-                L.marker([shopLat, shopLng]).addTo(map).bindPopup('Γύρος House').openPopup();
+                L.marker([shopLat, shopLng]).addTo(map).bindPopup('Ο Στέλιος').openPopup();
                 riderMarker = L.marker([riderLat, riderLng]).addTo(map).bindPopup('Εσείς');
             }
             map.invalidateSize();
@@ -112,7 +112,6 @@
 
                 if(steps >= 12) {
                     clearInterval(moveInterval);
-                    riderMarker.bindPopup('Φτάσατε στο κατάστημα!').openPopup();
                 }
             }, 1200);
         }
@@ -123,7 +122,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ status: 'Παραδόθηκε' })
             }).then(() => {
-                alert("Η παράδοση ολοκληρώθηκε! Έβγαλες 5.00€!");
+                alert("Ολοκληρώθηκε!");
                 location.reload();
             });
         }
