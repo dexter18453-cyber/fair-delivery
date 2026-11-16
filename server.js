@@ -27,6 +27,7 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const sessions = new Map();
 const requestWindows = new Map();
 const aiWindows = new Map();
+const authWindows = new Map();
 
 const DEFAULT_SETTINGS = {
   currency: 'EUR',
@@ -34,7 +35,8 @@ const DEFAULT_SETTINGS = {
   shopCommissionPercent: 0,
   riderBaseAmount: 2.50,
   riderPerKm: 0.80,
-  badWeatherBonus: 1.50
+  badWeatherBonus: 1.50,
+  storeLocation: null
 };
 
 const DEFAULT_PRODUCTS = [
@@ -54,8 +56,40 @@ function publicOrder(order) {
     id: order.id, items: order.items, subtotal: order.subtotal, serviceFee: order.serviceFee,
     total: order.total, status: order.status, createdAt: order.createdAt, updatedAt: order.updatedAt,
     estimatedKm: order.estimatedKm ?? null, badWeather: Boolean(order.badWeather),
-    riderPayEstimate: order.riderPayEstimate ?? null, riderLocation: order.riderLocation || null
+    riderPayEstimate: order.riderPayEstimate ?? null,
+    deliveryLocation: order.deliveryLocation || null,
+    riderLocation: ['assigned', 'picked_up'].includes(order.status) && state.riders[order.assignedRider]?.online ? order.riderLocation || null : null
   };
+}
+
+// Private delivery data is returned only to authenticated shop/rider/admin sessions.
+function privateOrder(order) {
+  const rider = order.assignedRider ? state.riders[order.assignedRider] : null;
+  return {
+    ...publicOrder(order),
+    customerName: order.customerName || '',
+    customerPhone: order.customerPhone || '',
+    deliveryAddress: order.deliveryAddress || '',
+    assignedRider: order.assignedRider || null,
+    assignedRiderName: rider?.name || order.assignedRiderName || null
+  };
+}
+
+function riderCodeHash(code, salt) {
+  return new Promise((resolve, reject) => crypto.scrypt(String(code), salt, 64, (error, hash) => error ? reject(error) : resolve(hash.toString('hex'))));
+}
+
+function riderProfile(rider) {
+  return { id: rider.id, name: rider.name, online: Boolean(rider.online), storeId: rider.storeId || 'default' };
+}
+
+function validPoint(point) {
+  return point && typeof point.lat === 'number' && typeof point.lng === 'number' &&
+    Number.isFinite(point.lat) && Number.isFinite(point.lng) && Math.abs(point.lat) <= 90 && Math.abs(point.lng) <= 180;
+}
+
+function hideRiderLocation(riderId) {
+  for (const order of state.orders) if (order.assignedRider === riderId) order.riderLocation = null;
 }
 
 async function initState() {
@@ -107,7 +141,11 @@ function readJson(req, maxBytes = 32 * 1024) {
       }
     });
     req.on('end', () => {
-      try { resolve(raw ? JSON.parse(raw) : {}); }
+      try {
+        const body = raw ? JSON.parse(raw) : {};
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Expected JSON object');
+        resolve(body);
+      }
       catch { reject(Object.assign(new Error('Μη έγκυρο JSON.'), { statusCode: 400 })); }
     });
     req.on('error', reject);
@@ -130,7 +168,7 @@ function parseCookies(header = '') {
 function getSession(req, roleHint) {
   const cookies = parseCookies(req.headers.cookie || '');
   const roles = ['admin', 'shop', 'rider'];
-  const ordered = roles.includes(roleHint) ? [roleHint, ...roles.filter(role => role !== roleHint)] : roles;
+  const ordered = roles.includes(roleHint) ? [roleHint] : roles;
   for (const role of ordered) {
     const token = cookies[`fd_${role}_session`];
     if (!token) continue;
@@ -143,7 +181,11 @@ function getSession(req, roleHint) {
 
 function requireRole(req, res, allowedRoles) {
   const roleHint = String(req.headers['x-fd-role'] || '');
-  const session = getSession(req, allowedRoles.includes(roleHint) ? roleHint : allowedRoles[0]);
+  if (roleHint && !allowedRoles.includes(roleHint)) {
+    sendJson(res, 401, { error: 'Χρειάζεται σύνδεση με κατάλληλο λογαριασμό.' });
+    return null;
+  }
+  const session = getSession(req, roleHint || undefined);
   if (!session || !allowedRoles.includes(session.role)) {
     sendJson(res, 401, { error: 'Χρειάζεται σύνδεση με κατάλληλο λογαριασμό.' });
     return null;
@@ -181,27 +223,54 @@ async function handleApi(req, res, url) {
   const method = req.method;
 
   if (method === 'GET' && pathname === '/api/health') {
-    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.1.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_MODEL) });
+    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.2.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_MODEL) });
   }
 
   if (method === 'POST' && pathname === '/api/auth/login') {
+    if (!rateLimit(authWindows, clientIp(req), 20, 15 * 60_000)) return sendJson(res, 429, { error: 'Πολλές προσπάθειες σύνδεσης. Δοκίμασε ξανά αργότερα.' });
     const body = await readJson(req, 4096);
     const role = ['shop', 'rider', 'admin'].includes(body.role) ? body.role : '';
     if (!role) return sendJson(res, 400, { error: 'Μη έγκυρος ρόλος.' });
-    const expected = roleCode(role);
-    if (!expected) return sendJson(res, 503, { error: `Δεν έχει οριστεί κωδικός πρόσβασης για τον ρόλο ${role}.` });
-    if (!safeEqual(String(body.code || ''), expected)) return sendJson(res, 401, { error: 'Λάθος κωδικός πρόσβασης.' });
+
+    let userId = `${role}-${crypto.randomUUID()}`;
+    let storeId = 'default';
+    let riderName = null;
+
+    if (role === 'rider') {
+      const riderId = String(body.riderId || '');
+      const rider = state.riders[riderId];
+      if (!rider || rider.active === false || !rider.codeSalt || !rider.codeHash) {
+        return sendJson(res, 401, { error: 'Δεν βρέθηκε ενεργός λογαριασμός διανομέα.' });
+      }
+      const suppliedHash = await riderCodeHash(String(body.code || ''), rider.codeSalt);
+      if (!safeEqual(suppliedHash, rider.codeHash)) return sendJson(res, 401, { error: 'Λάθος κωδικός διανομέα.' });
+      userId = rider.id;
+      storeId = rider.storeId || 'default';
+      riderName = rider.name;
+    } else {
+      const expected = roleCode(role);
+      if (!expected) return sendJson(res, 503, { error: `Δεν έχει οριστεί κωδικός πρόσβασης για τον ρόλο ${role}.` });
+      if (!safeEqual(String(body.code || ''), expected)) return sendJson(res, 401, { error: 'Λάθος κωδικός πρόσβασης.' });
+    }
+
     const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, { role, userId: `${role}-${crypto.randomUUID()}`, expiresAt: Date.now() + SESSION_TTL_MS });
+    sessions.set(token, { role, userId, storeId, expiresAt: Date.now() + SESSION_TTL_MS });
     const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
-    return sendJson(res, 200, { ok: true, role, expiresInSeconds: SESSION_TTL_MS / 1000 }, { 'Set-Cookie': `fd_${role}_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}${secure}` });
+    return sendJson(res, 200, { ok: true, role, userId, riderName, expiresInSeconds: SESSION_TTL_MS / 1000 }, { 'Set-Cookie': `fd_${role}_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}${secure}` });
   }
 
   if (method === 'POST' && pathname === '/api/auth/logout') {
     const body = await readJson(req, 1024);
     const role = ['shop', 'rider', 'admin'].includes(body.role) ? body.role : '';
     const session = role ? getSession(req, role) : null;
-    if (session) sessions.delete(session.token);
+    if (session) {
+      sessions.delete(session.token);
+      if (session.role === 'rider' && state.riders[session.userId]) {
+        state.riders[session.userId].online = false;
+        hideRiderLocation(session.userId);
+        await persistState();
+      }
+    }
     const cookieName = role ? `fd_${role}_session` : 'fd_admin_session';
     return sendJson(res, 200, { ok: true }, { 'Set-Cookie': `${cookieName}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` });
   }
@@ -213,7 +282,7 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'GET' && pathname === '/api/config') {
-    return sendJson(res, 200, { settings: state.settings, demoMode: DEMO_MODE });
+    return sendJson(res, 200, { settings: state.settings, storeLocation: state.settings.storeLocation || null, demoMode: DEMO_MODE });
   }
 
   if (method === 'GET' && pathname === '/api/products') {
@@ -225,8 +294,24 @@ async function handleApi(req, res, url) {
     if (!rateLimit(requestWindows, `orders:${ip}`, 10, 60_000)) return sendJson(res, 429, { error: 'Πολλές δοκιμαστικές παραγγελίες. Περίμενε ένα λεπτό.' });
     const body = await readJson(req, 12 * 1024);
     if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 30) return sendJson(res, 400, { error: 'Το καλάθι δεν είναι έγκυρο.' });
+
+    const customerName = String(body.customerName || '').trim();
+    const customerPhone = String(body.customerPhone || '').trim();
+    const deliveryAddress = String(body.deliveryAddress || '').trim();
+    const location = body.deliveryLocation || {};
+    const deliveryLat = Number(location.lat);
+    const deliveryLng = Number(location.lng);
+    if (customerName.length < 2 || customerName.length > 80) return sendJson(res, 400, { error: 'Συμπλήρωσε έγκυρο όνομα πελάτη.' });
+    if (customerPhone.length < 6 || customerPhone.length > 30) return sendJson(res, 400, { error: 'Συμπλήρωσε έγκυρο τηλέφωνο επικοινωνίας.' });
+    if (deliveryAddress.length < 5 || deliveryAddress.length > 240) return sendJson(res, 400, { error: 'Συμπλήρωσε τη διεύθυνση παράδοσης.' });
+    if (body.privacyConsent !== true) return sendJson(res, 400, { error: 'Χρειάζεται συγκατάθεση για τη χρήση των στοιχείων παράδοσης στην πιλοτική παραγγελία.' });
+    if (!validPoint(location)) {
+      return sendJson(res, 400, { error: 'Επίλεξε σημείο παράδοσης στον χάρτη.' });
+    }
+
     const lines = [];
     for (const row of body.items) {
+      if (!row || typeof row !== 'object') return sendJson(res, 400, { error: 'Μη έγκυρο προϊόν ή ποσότητα.' });
       const product = state.products.find(p => p.id === String(row.productId) && p.active);
       const qty = Number(row.qty);
       if (!product || !Number.isInteger(qty) || qty < 1 || qty > 20) return sendJson(res, 400, { error: 'Μη έγκυρο προϊόν ή ποσότητα.' });
@@ -234,10 +319,13 @@ async function handleApi(req, res, url) {
     }
     const subtotal = round2(lines.reduce((sum, line) => sum + line.lineTotal, 0));
     const order = {
-      id: crypto.randomUUID(), items: lines, subtotal,
+      id: crypto.randomUUID(), storeId: 'default', items: lines, subtotal,
+      customerName, customerPhone, deliveryAddress,
+      deliveryLocation: { lat: deliveryLat, lng: deliveryLng },
       serviceFee: round2(state.settings.customerServiceFee), total: round2(subtotal + state.settings.customerServiceFee),
       status: 'new', createdAt: nowIso(), updatedAt: nowIso(),
-      estimatedKm: null, badWeather: false, riderPayEstimate: null, assignedRider: null, riderLocation: null
+      estimatedKm: null, badWeather: false, riderPayEstimate: null,
+      assignedRider: null, assignedRiderName: null, riderLocation: null
     };
     state.orders.push(order); await persistState();
     return sendJson(res, 201, { order: publicOrder(order), trackingUrl: `/customer-app.html?order=${encodeURIComponent(order.id)}` });
@@ -252,8 +340,9 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && pathname === '/api/orders') {
     const session = requireRole(req, res, ['shop', 'rider', 'admin']); if (!session) return;
     let orders = state.orders.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    if (session.role === 'rider') orders = orders.filter(o => ['ready', 'assigned', 'picked_up'].includes(o.status) && (!o.assignedRider || o.assignedRider === session.userId));
-    return sendJson(res, 200, { orders: orders.map(publicOrder) });
+    if (session.role === 'rider') orders = orders.filter(o => ['assigned', 'picked_up'].includes(o.status) && o.assignedRider === session.userId);
+    if (session.role === 'shop') orders = orders.filter(o => (o.storeId || 'default') === (session.storeId || 'default'));
+    return sendJson(res, 200, { orders: orders.map(privateOrder) });
   }
 
   const orderMutation = pathname.match(/^\/api\/orders\/([0-9a-f-]+)$/i);
@@ -262,27 +351,40 @@ async function handleApi(req, res, url) {
     const body = await readJson(req, 4096);
     const order = state.orders.find(item => item.id === orderMutation[1]);
     if (!order) return sendJson(res, 404, { error: 'Η παραγγελία δεν βρέθηκε.' });
+    if (session.role === 'shop' && (order.storeId || 'default') !== session.storeId) return sendJson(res, 403, { error: 'Η παραγγελία ανήκει σε άλλο κατάστημα.' });
     const status = String(body.status || '');
     const transitions = {
-      shop: { new: ['accepted', 'cancelled'], accepted: ['ready'] },
-      rider: { ready: ['assigned'], assigned: ['picked_up'], picked_up: ['delivered'] },
+      shop: { new: ['accepted', 'cancelled'], accepted: ['ready'], ready: ['assigned'] },
+      rider: { assigned: ['picked_up'], picked_up: ['delivered'] },
       admin: { new: ['accepted', 'cancelled'], accepted: ['ready', 'cancelled'], ready: ['assigned', 'cancelled'], assigned: ['picked_up', 'cancelled'], picked_up: ['delivered', 'cancelled'] }
     };
     if (!(transitions[session.role]?.[order.status] || []).includes(status)) return sendJson(res, 409, { error: `Δεν επιτρέπεται η μετάβαση ${order.status} → ${status} για τον ρόλο ${session.role}.` });
-    if (session.role === 'rider' && order.assignedRider && order.assignedRider !== session.userId) return sendJson(res, 403, { error: 'Η παραγγελία έχει ανατεθεί σε άλλον διανομέα.' });
+    if (session.role === 'rider' && order.assignedRider !== session.userId) return sendJson(res, 403, { error: 'Η παραγγελία δεν έχει ανατεθεί στον δικό σου λογαριασμό.' });
+    let assignedRider = null;
+    if (status === 'assigned') {
+      if (!['shop', 'admin'].includes(session.role)) return sendJson(res, 403, { error: 'Η ανάθεση γίνεται από το κατάστημα.' });
+      const riderId = String(body.riderId || '');
+      const rider = state.riders[riderId];
+      if (!rider || rider.active === false || rider.storeId !== (session.storeId || 'default')) return sendJson(res, 400, { error: 'Επίλεξε ενεργό διανομέα του καταστήματος.' });
+      assignedRider = rider;
+    }
+    let estimatedKm = order.estimatedKm;
     if (body.estimatedKm !== undefined) {
       const km = Number(body.estimatedKm);
-      if (!Number.isFinite(km) || km < 0 || km > 100) return sendJson(res, 400, { error: 'Τα χιλιόμετρα πρέπει να είναι από 0 έως 100.' });
-      order.estimatedKm = round2(km);
+      if (typeof body.estimatedKm !== 'number' || !Number.isFinite(km) || km < 0 || km > 100) return sendJson(res, 400, { error: 'Τα χιλιόμετρα πρέπει να είναι από 0 έως 100.' });
+      estimatedKm = round2(km);
     }
-    if (body.badWeather !== undefined) order.badWeather = Boolean(body.badWeather);
-    if (status === 'assigned') order.assignedRider = session.userId;
+    if (body.badWeather !== undefined && typeof body.badWeather !== 'boolean') return sendJson(res, 400, { error: 'Η ένδειξη κακοκαιρίας πρέπει να είναι true ή false.' });
+    order.estimatedKm = estimatedKm;
+    if (assignedRider) { order.assignedRider = assignedRider.id; order.assignedRiderName = assignedRider.name; }
+    if (body.badWeather !== undefined) order.badWeather = body.badWeather;
     if (status === 'delivered' && Number.isFinite(order.estimatedKm)) {
       order.riderPayEstimate = round2(state.settings.riderBaseAmount + order.estimatedKm * state.settings.riderPerKm + (order.badWeather ? state.settings.badWeatherBonus : 0));
     }
     order.status = status; order.updatedAt = nowIso();
+    if (['delivered', 'cancelled'].includes(status)) order.riderLocation = null;
     await persistState();
-    return sendJson(res, 200, { order: publicOrder(order) });
+    return sendJson(res, 200, { order: privateOrder(order) });
   }
 
   if (method === 'GET' && pathname === '/api/stats') {
@@ -303,16 +405,55 @@ async function handleApi(req, res, url) {
     const session = requireRole(req, res, ['admin']); if (!session) return;
     const body = await readJson(req, 4096);
     const allowed = ['customerServiceFee', 'shopCommissionPercent', 'riderBaseAmount', 'riderPerKm', 'badWeatherBonus'];
+    const settings = { ...state.settings };
     for (const key of allowed) {
       if (body[key] !== undefined) {
         const value = Number(body[key]);
         const max = key === 'shopCommissionPercent' ? 100 : 1000;
         if (!Number.isFinite(value) || value < 0 || value > max) return sendJson(res, 400, { error: `Μη έγκυρη τιμή για ${key}.` });
-        state.settings[key] = round2(value);
+        settings[key] = round2(value);
       }
     }
+    state.settings = settings;
     await persistState();
     return sendJson(res, 200, { settings: state.settings });
+  }
+
+  if ((method === 'GET' || method === 'POST') && pathname === '/api/shop/riders') {
+    const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
+    const storeId = session.storeId || 'default';
+    if (method === 'GET') {
+      const riders = Object.values(state.riders)
+        .filter(r => r.id && (r.storeId || 'default') === storeId)
+        .map(r => ({ id: r.id, name: r.name, active: r.active !== false, online: Boolean(r.online), lat: r.lat ?? null, lng: r.lng ?? null, updatedAt: r.updatedAt || null }));
+      return sendJson(res, 200, { riders });
+    }
+    const body = await readJson(req, 4096);
+    const name = String(body.name || '').trim();
+    if (name.length < 2 || name.length > 80) return sendJson(res, 400, { error: 'Το όνομα οδηγού πρέπει να έχει 2 έως 80 χαρακτήρες.' });
+    const id = crypto.randomUUID();
+    const accessCode = crypto.randomBytes(9).toString('base64url');
+    const salt = crypto.randomBytes(16).toString('hex');
+    state.riders[id] = { id, name, storeId, codeSalt: salt, codeHash: await riderCodeHash(accessCode, salt), active: true, online: false, createdAt: nowIso(), updatedAt: nowIso() };
+    await persistState();
+    return sendJson(res, 201, { rider: { id, name, active: true, online: false }, accessCode });
+  }
+
+  if (method === 'POST' && pathname === '/api/shop/location') {
+    const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
+    const body = await readJson(req, 4096);
+    const lat = Number(body.lat); const lng = Number(body.lng);
+    if (!validPoint(body)) return sendJson(res, 400, { error: 'Μη έγκυρες συντεταγμένες καταστήματος.' });
+    state.settings.storeLocation = { lat, lng, updatedAt: nowIso() };
+    await persistState();
+    return sendJson(res, 200, { storeLocation: state.settings.storeLocation });
+  }
+
+  if (method === 'GET' && pathname === '/api/rider/profile') {
+    const session = requireRole(req, res, ['rider']); if (!session) return;
+    const rider = state.riders[session.userId];
+    if (!rider) return sendJson(res, 404, { error: 'Δεν βρέθηκε το προφίλ διανομέα.' });
+    return sendJson(res, 200, { rider: riderProfile(rider) });
   }
 
   if (method === 'POST' && pathname === '/api/rider/status') {
@@ -320,15 +461,17 @@ async function handleApi(req, res, url) {
     const body = await readJson(req, 4096);
     if (typeof body.online !== 'boolean') return sendJson(res, 400, { error: 'Η κατάσταση online πρέπει να είναι true ή false.' });
     state.riders[session.userId] = { ...(state.riders[session.userId] || {}), online: body.online, updatedAt: nowIso() };
+    if (!body.online) hideRiderLocation(session.userId);
     await persistState();
-    return sendJson(res, 200, { rider: state.riders[session.userId] });
+    return sendJson(res, 200, { rider: riderProfile(state.riders[session.userId]) });
   }
 
   if (method === 'POST' && pathname === '/api/rider/location') {
     const session = requireRole(req, res, ['rider']); if (!session) return;
     const body = await readJson(req, 4096); const lat = Number(body.lat); const lng = Number(body.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) return sendJson(res, 400, { error: 'Μη έγκυρες συντεταγμένες.' });
-    state.riders[session.userId] = { ...(state.riders[session.userId] || {}), online: true, lat, lng, updatedAt: nowIso() };
+    if (!validPoint(body)) return sendJson(res, 400, { error: 'Μη έγκυρες συντεταγμένες.' });
+    if (!state.riders[session.userId]?.online) return sendJson(res, 409, { error: 'Ενεργοποίησε πρώτα τη διαθεσιμότητά σου.' });
+    state.riders[session.userId] = { ...state.riders[session.userId], lat, lng, updatedAt: nowIso() };
     for (const order of state.orders) if (order.assignedRider === session.userId && !['delivered', 'cancelled'].includes(order.status)) order.riderLocation = { lat, lng, updatedAt: nowIso() };
     await persistState();
     return sendJson(res, 200, { ok: true });
@@ -402,7 +545,7 @@ const server = http.createServer(async (req, res) => {
 const stateReady = initState();
 if (require.main === module) {
   stateReady.then(() => server.listen(PORT, HOST, () => {
-    console.log(`Fair Delivery 1.1.0 listening on http://${HOST}:${PORT}`);
+    console.log(`Fair Delivery 1.2.0 listening on http://${HOST}:${PORT}`);
     console.log(`Mode: ${DEMO_MODE ? 'LOCAL DEMO (access code: demo)' : 'PILOT (role access codes required)'}`);
     console.log(`Data: ${STATE_FILE}`);
   })).catch(error => { console.error('Could not initialize database:', error); process.exit(1); });

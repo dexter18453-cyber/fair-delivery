@@ -1,13 +1,14 @@
 'use strict';
 const FD = {
+  role: ({ '/': 'admin', '/index.html': 'admin', '/shop-app.html': 'shop', '/Rider-App.html': 'rider' })[location.pathname] || '',
   async api(url, options = {}) {
-    const response = await fetch(url, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), 'X-FD-Role': sessionStorage.getItem('fd_role') || '', ...(options.headers || {}) } });
+    const response = await fetch(url, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), 'X-FD-Role': this.role, ...(options.headers || {}) } });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     return data;
   },
-  async login(role, code) { const result = await this.api('/api/auth/login', { method: 'POST', body: JSON.stringify({ role, code }) }); sessionStorage.setItem('fd_role', role); return result; },
-  async logout(role) { const result = await this.api('/api/auth/logout', { method: 'POST', body: JSON.stringify({ role }), headers: { 'X-FD-Role': role } }); if (sessionStorage.getItem('fd_role') === role) sessionStorage.removeItem('fd_role'); return result; },
+  async login(role, code, extra = {}) { return this.api('/api/auth/login', { method: 'POST', body: JSON.stringify({ role, code, ...extra }) }); },
+  async logout(role) { return this.api('/api/auth/logout', { method: 'POST', body: JSON.stringify({ role }), headers: { 'X-FD-Role': role } }); },
   async me(role) { return this.api('/api/auth/me', { headers: role ? { 'X-FD-Role': role } : {} }); },
   money(value) { return new Intl.NumberFormat('el-GR', { style: 'currency', currency: 'EUR' }).format(Number(value || 0)); },
   esc(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); },
