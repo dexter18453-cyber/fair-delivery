@@ -135,6 +135,25 @@ async function initState() {
       }
       state = normalizeState(legacy);
     }
+    // Remove only synthetic orders that were accidentally written by an earlier
+    // build-time smoke test inheriting DATABASE_URL. Preserve all other orders.
+    if (process.env.RENDER && state.settings.pilotSmokeCleanupVersion !== 1) {
+      const fake = order => (
+        (order.customerName === 'Test Customer' && order.customerPhone === '6900000000') ||
+        (order.customerName === 'Second Customer' && order.customerPhone === '6900000001')
+      );
+      if (state.orders.some(fake)) {
+        state.orders = state.orders.filter(order => !fake(order));
+        for (const [id, rider] of Object.entries(state.riders)) {
+          if (rider.name === 'Test Rider') delete state.riders[id];
+        }
+        state.products = state.products.filter(p => p.name !== 'Test Souvlaki');
+        state.settings.shopDeliveryFee = 0;
+        state.shopCredential = null;
+        state.settings.pilotSmokeCleanupVersion = 1;
+        console.log('[FairDelivery] Removed synthetic build-test data from pilot PostgreSQL');
+      }
+    }
     await persistState();
     return;
   }
@@ -705,9 +724,9 @@ const server = http.createServer(async (req, res) => {
 const stateReady = initState();
 if (require.main === module) {
   stateReady.then(() => server.listen(PORT, HOST, () => {
-    console.log(`Fair Delivery 1.2.0 listening on http://${HOST}:${PORT}`);
+    console.log(`Fair Delivery 1.3.0 listening on http://${HOST}:${PORT}`);
     console.log(`Mode: ${DEMO_MODE ? 'LOCAL DEMO (access code: demo)' : 'PILOT (role access codes required)'}`);
-    console.log(`Data: ${STATE_FILE}`);
+    console.log(`Storage: ${postgresPool ? 'PostgreSQL' : STATE_FILE}`);
   })).catch(error => { console.error('Could not initialize database:', error); process.exit(1); });
 }
 

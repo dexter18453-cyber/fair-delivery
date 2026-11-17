@@ -20,7 +20,7 @@ test('assigned deliveries survive login and restart, with separate roles and pri
   async function start() {
     child = spawn(process.execPath, ['server.js'], {
       cwd: path.join(__dirname, '..'),
-      env: { ...process.env, NODE_ENV: 'test', DEMO_MODE: 'true', DATA_DIR: dataDir, HOST: '127.0.0.1', PORT: String(port) },
+      env: { ...process.env, RENDER: '', DATABASE_URL: '', NODE_ENV: 'test', DEMO_MODE: 'true', DATA_DIR: dataDir, HOST: '127.0.0.1', PORT: String(port) },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     child.stdout.on('data', chunk => { logs = (logs + chunk).slice(-3000); });

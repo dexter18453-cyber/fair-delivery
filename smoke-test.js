@@ -6,7 +6,7 @@ const path = require('path');
 const assert = require('node:assert/strict');
 const port = 32187 + Math.floor(Math.random() * 1000);
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fair-delivery-test-'));
-const child = spawn(process.execPath, ['server.js'], { cwd: __dirname, env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, DEMO_MODE: 'true' }, stdio: ['ignore','pipe','pipe'] });
+const child = spawn(process.execPath, ['server.js'], { cwd: __dirname, env: { ...process.env, RENDER: '', DATABASE_URL: '', NODE_ENV: 'test', PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir, DEMO_MODE: 'true' }, stdio: ['ignore','pipe','pipe'] });
 const base = `http://127.0.0.1:${port}`;
 const cookies = {}; let activeRole = '';
 function rememberCookie(response, role) { const raw = response.headers.get('set-cookie') || ''; const first = raw.split(';')[0]; if (first) cookies[role] = first; activeRole = role; }
