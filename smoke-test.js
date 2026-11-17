@@ -26,7 +26,7 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
     assert.equal(document.status,200,'Role page failed: '+role);
     const html = await document.text();
     assert.match(html,new RegExp('/app/'+role+'/manifest\\.webmanifest'));
-    assert.match(html,/assets\\/pwa\\.js/);
+    assert.ok(html.includes('/assets/pwa.js'));
     const response = await fetch(base+root+'manifest.webmanifest');
     assert.equal(response.status,200);
     assert.match(response.headers.get('content-type'),/manifest/);
@@ -38,7 +38,7 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
     for (const size of [192,512]) {
       const icon=await fetch(base+root+'icon-'+size+'.png');
       assert.equal(icon.status,200);
-      assert.match(icon.headers.get('content-type'),/image\\/png/);
+      assert.ok(icon.headers.get('content-type').includes('image/png'));
       const bytes=Buffer.from(await icon.arrayBuffer());
       assert.equal(bytes.readUInt32BE(0),0x89504e47);
       assert.equal(bytes.readUInt32BE(16),size);
