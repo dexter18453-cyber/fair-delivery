@@ -20,7 +20,7 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   const html = await fetch(base + '/'); assert.equal(html.status, 200); assert.match(await html.text(), /Fair Delivery/);
   for (const file of ['/admin.js','/customer.js','/shop.js','/rider.js','/assets/app.css','/assets/common.js','/customer-app.html','/shop-app.html','/Rider-App.html']) { const asset = await fetch(base + file); assert.equal(asset.status, 200, `static asset not served: ${file}`); }
   const manifests = [];
-  for (const role of ['shop','rider','admin']) {
+  for (const role of ['shop','rider','admin','customer']) {
     const root = '/app/' + role + '/';
     const document = await fetch(base + root);
     assert.equal(document.status,200,'Role page failed: '+role);
@@ -48,7 +48,7 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
     assert.equal(worker.status,200);
     assert.match(await worker.text(),/navigate/);
   }
-  assert.equal(new Set(manifests).size,3,'Installed apps must have distinct IDs');
+  assert.equal(new Set(manifests).size,4,'Installed apps must have distinct IDs');
   assert.equal((await fetch(base+'/app/not-a-role/')).status,404);
   await login('shop');
   assert.equal((await api('/api/config')).settings.customerServiceFee, 1.79);
@@ -63,6 +63,7 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   assert.equal((await api('/api/products')).products.some(p => p.id === createdProduct.product.id), false);
   await api('/api/shop/delivery-fee', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deliveryFee: 1.5 }) });
   const orderResult = await api('/api/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [{ productId: menu.products[0].id, qty: 2 }], customerName: 'Test Customer', customerPhone: '6900000000', deliveryAddress: 'Test Street 10, Athens', deliveryLocation: { lat: 37.98, lng: 23.72 }, privacyConsent: true }) });
+  assert.match(orderResult.trackingUrl, /^\/app\/customer\/\?order=/);
   const id = orderResult.order.id; assert.equal(orderResult.order.status, 'new'); assert.deepEqual(orderResult.order.deliveryLocation, { lat: 37.98, lng: 23.72 });
   assert.equal(orderResult.order.serviceFee, 1.79);
   assert.equal(orderResult.order.deliveryFee, 1.5);

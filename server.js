@@ -467,7 +467,7 @@ async function handleApi(req, res, url) {
       assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
     };
     state.orders.push(order); await persistState();
-    return sendJson(res, 201, { order: publicOrder(order), trackingUrl: `/customer-app.html?order=${encodeURIComponent(order.id)}` });
+    return sendJson(res, 201, { order: publicOrder(order), trackingUrl: `/app/customer/?order=${encodeURIComponent(order.id)}` });
   }
 
   const publicTracking = pathname.match(/^\/api\/orders\/([0-9a-f-]+)$/i);
@@ -694,7 +694,8 @@ async function handleApi(req, res, url) {
 const ROLE_PWAS = {
   shop: { name: 'Fair Delivery Store', short: 'FD Store', label: 'Κατάστημα', color: '#ee3c52', page: '/shop-app.html' },
   rider: { name: 'Fair Delivery Rider', short: 'FD Rider', label: 'Διανομέας', color: '#ff5949', page: '/Rider-App.html' },
-  admin: { name: 'Fair Delivery Admin', short: 'FD Admin', label: 'Διαχείριση', color: '#da385e', page: '/index.html' }
+  admin: { name: 'Fair Delivery Admin', short: 'FD Admin', label: 'Διαχείριση', color: '#da385e', page: '/index.html' },
+  customer: { name: 'Fair Delivery Customer', short: 'FD Customer', label: 'Πελάτης', color: '#ef3c5c', page: '/customer-app.html' }
 };
 const pwaIconCache = new Map();
 function pngCrc(buffer) {
@@ -731,7 +732,14 @@ function roleIconPng(role, size) {
       let accent = false, white = false;
       const ring = circle(u,v,.5,.5,.35) && !circle(u,v,.5,.5,.332);
       accent = ring;
-      if (role === 'shop') {
+      if (role === 'customer') {
+        // Distinct customer shopping bag icon, independent of shop/rider/admin.
+        accent ||= inside(u,v,.27,.43,.73,.76) && !inside(u,v,.31,.48,.69,.71);
+        accent ||= inside(u,v,.26,.42,.74,.48) || inside(u,v,.27,.72,.73,.76);
+        accent ||= inside(u,v,.27,.48,.31,.72) || inside(u,v,.69,.48,.73,.72);
+        accent ||= circle(u,v,.50,.45,.15) && !circle(u,v,.50,.45,.095) && v <= .45;
+        white ||= inside(u,v,.39,.54,.61,.59) || inside(u,v,.48,.51,.52,.66);
+      } else if (role === 'shop') {
         accent ||= inside(u,v,.235,.37,.765,.49) || inside(u,v,.25,.53,.30,.76) || inside(u,v,.70,.53,.75,.76) || inside(u,v,.25,.72,.75,.77);
         white ||= inside(u,v,.31,.53,.44,.68) || inside(u,v,.49,.53,.66,.71) && !inside(u,v,.55,.62,.60,.71);
         // Storefront awning stripes.
@@ -757,7 +765,7 @@ function roleIconPng(role, size) {
   return png;
 }
 async function serveRoleApp(req, res, url) {
-  const match = /^\/app\/(shop|rider|admin)\/(manifest\.webmanifest|sw\.js|icon-(192|512)\.png|offline\.html)?$/.exec(url.pathname);
+  const match = /^\/app\/(shop|rider|admin|customer)\/(manifest\.webmanifest|sw\.js|icon-(192|512)\.png|offline\.html)?$/.exec(url.pathname);
   if (!match) return false;
   if (!['GET','HEAD'].includes(req.method)) { sendJson(res,405,{ error:'Μη επιτρεπτή μέθοδος.' }); return true; }
   const role = match[1], asset = match[2] || '', config = ROLE_PWAS[role], scope = '/app/' + role + '/';

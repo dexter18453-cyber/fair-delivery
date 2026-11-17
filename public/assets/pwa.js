@@ -1,11 +1,11 @@
 'use strict';
 (() => {
   const role = document.body?.dataset.appRole;
-  if (!['shop','rider','admin'].includes(role)) return;
+  if (!['shop','rider','admin','customer'].includes(role)) return;
   const scope = '/app/' + role + '/';
   const isScoped = location.pathname.startsWith(scope);
   const isInstalled = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
-  const names = { shop: 'Κατάστημα', rider: 'Διανομέας', admin: 'Διαχείριση' };
+  const names = { shop: 'Κατάστημα', rider: 'Διανομέας', admin: 'Διαχείριση', customer: 'Customer' };
   if (isScoped) document.body.classList.add('role-standalone');
   if (isScoped && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register(scope + 'sw.js', { scope }).catch(error => console.warn('PWA:', error));
