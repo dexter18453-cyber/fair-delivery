@@ -50,6 +50,30 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   }
   assert.equal(new Set(manifests).size,4,'Installed apps must have distinct IDs');
   assert.equal((await fetch(base+'/app/not-a-role/')).status,404);
+  for (const asset of ['/assets/v2.css','/assets/shell.js']) {
+    const response = await fetch(base + asset);
+    assert.equal(response.status, 200, 'Modern UI asset missing: ' + asset);
+  }
+  const uiViews = {
+    customer: ['discover','cart','checkout','tracking'],
+    shop: ['orders','menu','riders','settings'],
+    rider: ['jobs','map','profile'],
+    admin: ['overview','business','access','assistant']
+  };
+  for (const [role, views] of Object.entries(uiViews)) {
+    const response = await fetch(base + '/app/' + role + '/');
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    assert.ok(html.includes('data-app-role="' + role + '"'), 'Wrong app role: '+role);
+    assert.ok(html.includes('/assets/v2.css'), 'Modern CSS missing: '+role);
+    assert.ok(html.includes('/assets/shell.js'), 'Navigation missing: '+role);
+    for (const view of views) assert.ok(html.includes('data-view="' + view + '"'), 'Missing '+role+' section '+view);
+  }
+  const customerHtml = await (await fetch(base+'/app/customer/')).text();
+  assert.ok(customerHtml.includes('id="productSearch"'));
+  assert.ok(customerHtml.includes('id="categoryFilters"'));
+  const scopedCommon = await (await fetch(base+'/assets/common.js')).text();
+  assert.ok(scopedCommon.includes("'/app/shop/': 'shop'"), 'Role detection missing scoped shop PWA');
   await login('shop');
   assert.equal((await api('/api/config')).settings.customerServiceFee, 1.79);
   const created = await api('/api/shop/riders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Test Rider' }) });

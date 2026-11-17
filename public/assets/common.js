@@ -1,6 +1,6 @@
 'use strict';
 const FD = {
-  role: ({ '/': 'admin', '/index.html': 'admin', '/shop-app.html': 'shop', '/Rider-App.html': 'rider' })[location.pathname] || '',
+  role: ({ '/': 'admin', '/index.html': 'admin', '/shop-app.html': 'shop', '/Rider-App.html': 'rider', '/customer-app.html': 'customer', '/app/admin/': 'admin', '/app/shop/': 'shop', '/app/rider/': 'rider', '/app/customer/': 'customer' })[location.pathname] || '',
   async api(url, options = {}) {
     const response = await fetch(url, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), 'X-FD-Role': this.role, ...(options.headers || {}) } });
     const data = await response.json().catch(() => ({}));

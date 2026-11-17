@@ -33,12 +33,37 @@ function initDeliveryMap() {
   deliveryMap.on('click', e => setDeliveryPoint(e.latlng.lat, e.latlng.lng));
   setTimeout(() => deliveryMap.invalidateSize(), 200);
 }
+let selectedCategory='Όλα';
+function productEmoji(p) {
+  const text=(p.name+' '+p.category).toLocaleLowerCase('el-GR');
+  if(/καφ|coffee/.test(text))return '☕';
+  if(/πίτσα|pizza/.test(text))return '🍕';
+  if(/σουβλ|πίτα|γύρο/.test(text))return '🌯';
+  if(/burger|μπεργ/.test(text))return '🍔';
+  if(/σαλάτα|salad/.test(text))return '🥗';
+  return '🍽';
+}
+function renderFilteredProducts() {
+  const q=($('productSearch')?.value||'').trim().toLocaleLowerCase('el-GR');
+  const visible=products.filter(p=>(selectedCategory==='Όλα'||(p.category||'Μενού')===selectedCategory)&&(!q||[p.name,p.category,p.description].join(' ').toLocaleLowerCase('el-GR').includes(q)));
+  $('products').innerHTML=visible.map(p=>`<article class="product product-card"><span class="product-emoji" aria-hidden="true">${productEmoji(p)}</span><div class="product-content"><span class="eyebrow">${FD.esc(p.category||'Μενού')}</span><h3>${FD.esc(p.name)}</h3><p class="hint">${FD.esc(p.description||'Επιλογή από το μενού')}</p><div class="product-bottom"><strong class="price">${FD.money(p.price)}</strong><button data-add="${FD.esc(p.id)}">＋ Προσθήκη</button></div></div></article>`).join('')||'<div class="empty-state">Δεν βρέθηκαν προϊόντα. Δοκίμασε άλλη αναζήτηση.</div>';
+  document.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>changeQty(b.dataset.add,1));
+}
 async function loadProducts() {
   const [menu, config] = await Promise.all([FD.api('/api/products'), FD.api('/api/config')]); products = menu.products;
   serviceFee = Number(config.settings.customerServiceFee);
   deliveryFee = Number(config.settings.shopDeliveryFee || 0);
-  $('products').innerHTML = products.map(p => `<article class="product product-card"><div><span class="eyebrow">${FD.esc(p.category || 'ΜΕΝΟΥ')}</span><h3>${FD.esc(p.name)}</h3><div class="hint">${FD.esc(p.description || '')}</div><div class="price">${FD.money(p.price)}</div></div><button data-add="${FD.esc(p.id)}">Προσθήκη</button></article>`).join('') || '<p class="hint">Δεν υπάρχουν διαθέσιμα προϊόντα.</p>';
-  document.querySelectorAll('[data-add]').forEach(b => b.onclick = () => changeQty(b.dataset.add, 1));
+  const categories=['Όλα',...new Set(products.map(p=>p.category||'Μενού'))];
+  if($('categoryFilters')) {
+    $('categoryFilters').innerHTML=categories.map(c=>`<button type="button" class="category-chip ${c===selectedCategory?'selected':''}" data-category="${FD.esc(c)}">${FD.esc(c)}</button>`).join('');
+    document.querySelectorAll('[data-category]').forEach(b=>b.onclick=()=>{
+      selectedCategory=b.dataset.category;
+      document.querySelectorAll('[data-category]').forEach(x=>x.classList.toggle('selected',x===b));
+      renderFilteredProducts();
+    });
+  }
+  $('productSearch')?.addEventListener('input',renderFilteredProducts);
+  renderFilteredProducts();
   $('feeNote').textContent = `Χρέωση Fair Delivery: ${FD.money(serviceFee)} · Διανομή από το κατάστημα: ${FD.money(deliveryFee)} · Πιλοτική δοκιμή χωρίς online πληρωμή.`;
 }
 $('placeOrder').addEventListener('click', async () => {
@@ -73,7 +98,7 @@ function renderTrackingMap(order) {
   if (points.length) trackingMap.fitBounds(L.latLngBounds(points).pad(.25));
   setTimeout(() => trackingMap.invalidateSize(), 120);
 }
-async function showTracking(id) { currentOrderId = id; $('tracking').classList.remove('hidden'); $('orderId').textContent = id; $('trackingInfo').textContent = 'Γίνεται έλεγχος κατάστασης…'; if (trackingTimer) clearInterval(trackingTimer); trackingTimer = setInterval(refreshTracking, 7000); await refreshTracking(); }
+async function showTracking(id) { currentOrderId = id; $('trackingEmpty')?.classList.add('hidden'); if (window.FDUI?.show) window.FDUI.show('tracking'); $('tracking').classList.remove('hidden'); $('orderId').textContent = id; $('trackingInfo').textContent = 'Γίνεται έλεγχος κατάστασης…'; if (trackingTimer) clearInterval(trackingTimer); trackingTimer = setInterval(refreshTracking, 7000); await refreshTracking(); }
 async function refreshTracking() {
   if (!currentOrderId) return;
   try {

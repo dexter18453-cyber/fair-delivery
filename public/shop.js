@@ -65,6 +65,9 @@ async function loadOrders() {
   renderDrivers(currentDrivers);
   if (document.activeElement !== $('shopDeliveryFee')) $('shopDeliveryFee').value = config.settings.shopDeliveryFee || 0;
   const orders = r.orders;
+  if ($('shopActive')) $('shopActive').textContent=String(orders.filter(o=>!['delivered','cancelled'].includes(o.status)).length);
+  if ($('shopToday')) $('shopToday').textContent=String(orders.filter(o=>o.createdAt.slice(0,10)===new Date().toISOString().slice(0,10)).length);
+  if ($('shopOnline')) $('shopOnline').textContent=String(currentDrivers.filter(d=>d.online).length);
   $('orders').innerHTML = orders.length ? orders.map(o => {
     const assignment = o.status === 'ready' ? `<div class="assign-row"><button data-store-delivery="${o.id}">Έφυγε με διανομέα του καταστήματος</button>${currentDrivers.length ? `<select id="driver-${o.id}" aria-label="Επιλογή διανομέα"><option value="">Επίλεξε οδηγό με λογαριασμό</option>${currentDrivers.filter(d => d.active).map(d => `<option value="${FD.esc(d.id)}">${FD.esc(d.name)}${d.online ? ' · online' : ''}</option>`).join('')}</select><button data-assign="${o.id}">Ανάθεση σε λογαριασμό</button>` : ''}</div>` : '';
     const actions = o.status === 'new' ? `<button data-status="accepted" data-id="${o.id}">Αποδοχή</button><button class="danger" data-status="cancelled" data-id="${o.id}">Ακύρωση</button>` : o.status === 'accepted' ? `<button data-status="ready" data-id="${o.id}">Έτοιμη για διανομή</button><button class="danger" data-status="cancelled" data-id="${o.id}">Ακύρωση</button>` : o.status === 'ready' ? `<button class="danger" data-status="cancelled" data-id="${o.id}">Ακύρωση</button>` : o.status === 'assigned' && o.deliveryManagedByShop ? `<button data-status="delivered" data-id="${o.id}">Ολοκληρώθηκε η παράδοση</button>` : '';
