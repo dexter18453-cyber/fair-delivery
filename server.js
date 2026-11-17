@@ -4,6 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { validateApplication, evaluateApplication, pruneApplications } = require('./courier-onboarding');
 
 // Tiny .env reader: no dependency needed. Real environment variables win.
 function loadEnv(file = path.join(__dirname, '.env')) {
@@ -64,7 +65,8 @@ function normalizeState(parsed = {}) {
     products: Array.isArray(parsed.products) ? parsed.products : DEFAULT_PRODUCTS,
     orders: Array.isArray(parsed.orders) ? parsed.orders : [],
     riders: parsed.riders && typeof parsed.riders === 'object' ? parsed.riders : {},
-    shopCredential: parsed.shopCredential || null
+    shopCredential: parsed.shopCredential || null,
+    courierApplications: pruneApplications(parsed.courierApplications)
   };
 }
 
@@ -315,6 +317,82 @@ async function handleApi(req, res, url) {
 
   if (method === 'GET' && pathname === '/api/health') {
     return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.3.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_MODEL), storage: postgresPool ? 'postgres' : 'temporary-file' });
+  }
+
+
+  // Freelancer onboarding remains separate from shop-employed riders and dispatch accounts.
+  // Live intake is gated until the operator has published a complete privacy notice,
+  // secured a lawful basis, and reviewed operating/legal obligations.
+  if (method === 'GET' && pathname === '/api/courier-applications/config') {
+    return sendJson(res, 200, {
+      open: DEMO_MODE || process.env.COURIER_APPLICATIONS_OPEN === 'true',
+      mode: DEMO_MODE ? 'local-demo' : 'pilot',
+      retentionDays: 90,
+      automaticApproval: false,
+      registryVerification: false
+    });
+  }
+
+  if (method === 'POST' && pathname === '/api/courier-applications') {
+    if (!DEMO_MODE && process.env.COURIER_APPLICATIONS_OPEN !== 'true')
+      return sendJson(res, 503, { error: 'Οι αιτήσεις συνεργασίας δεν δέχονται ακόμη πραγματικά στοιχεία. Ο υπεύθυνος ολοκληρώνει την πολιτική απορρήτου και τους όρους συνεργασίας.' });
+    const origin = req.headers.origin;
+    if (origin && origin !== 'http://' + req.headers.host && origin !== 'https://' + req.headers.host)
+      return sendJson(res, 403, { error: 'Η αίτηση πρέπει να υποβληθεί από την επίσημη ιστοσελίδα.' });
+    if (!rateLimit(requestWindows, 'courier-intake:' + clientIp(req), 3, 60 * 60_000))
+      return sendJson(res, 429, { error: 'Πάρα πολλές αιτήσεις. Δοκίμασε ξανά αργότερα.' });
+    const body = await readJson(req, 4096);
+    let candidate;
+    try { candidate = validateApplication(body); }
+    catch (error) { return sendJson(res, 400, { error: error.message }); }
+    state.courierApplications = pruneApplications(state.courierApplications);
+    if (state.courierApplications.length >= 300)
+      return sendJson(res, 503, { error: 'Οι θέσεις του πιλοτικού μητρώου αιτήσεων έχουν συμπληρωθεί προσωρινά.' });
+    const duplicate = state.courierApplications.some(app => app.email === candidate.email &&
+       Date.now() - Date.parse(app.createdAt) < 24 * 60 * 60_000);
+    if (duplicate) return sendJson(res, 202, { received: true, screening: evaluateApplication(candidate),
+       message: 'Η αίτηση παραλήφθηκε. Θα επικοινωνήσουμε μαζί σου για τυχόν επόμενα βήματα.' });
+    const screening = evaluateApplication(candidate);
+    const application = { id: crypto.randomUUID(), ...candidate,
+      createdAt: nowIso(), updatedAt: nowIso(),
+      status: 'new', reviewNotes: '', reviewedAt: null };
+    state.courierApplications.push(application);
+    await persistState();
+    return sendJson(res, 202, { received: true, screening, 
+      message: 'Η αίτηση καταχωρίστηκε για ανθρώπινο έλεγχο. Δεν δημιουργήθηκε λογαριασμός διανομέα.' });
+  }
+
+  if (method === 'GET' && pathname === '/api/admin/courier-applications') {
+    if (!requireRole(req, res, ['admin'])) return;
+    return sendJson(res, 200, {
+      applications: state.courierApplications.map(app => ({
+        ...app, screening: evaluateApplication(app)
+      })).sort((a,b) => b.createdAt.localeCompare(a.createdAt)),
+      policies: { automaticApproval: false, retentionDays: 90, includesSensitiveDocuments: false }
+    });
+  }
+
+  const courierReview = pathname.match(/^\/api\/admin\/courier-applications\/([0-9a-f-]{36})$/i);
+  if (courierReview && ['PATCH', 'DELETE'].includes(method)) {
+    if (!requireRole(req, res, ['admin'])) return;
+    const app = state.courierApplications.find(item => item.id === courierReview[1]);
+    if (!app) return sendJson(res, 404, { error: 'Η αίτηση δεν βρέθηκε.' });
+    if (method === 'DELETE') {
+      state.courierApplications = state.courierApplications.filter(item => item.id !== app.id);
+      await persistState();
+      return sendJson(res, 200, { deleted: true });
+    }
+    const body = await readJson(req, 2048);
+    const statuses = ['new', 'contacted', 'needs-documents', 'reviewing', 'not-suitable'];
+    if (!statuses.includes(body.status)) return sendJson(res, 400, { error: 'Μη έγκυρη κατάσταση.' });
+    if (body.reviewNotes !== undefined && (typeof body.reviewNotes !== 'string' || body.reviewNotes.length > 500))
+      return sendJson(res, 400, { error: 'Οι σημειώσεις επιτρέπονται έως 500 χαρακτήρες.' });
+    app.status = body.status;
+    if (body.reviewNotes !== undefined) app.reviewNotes = body.reviewNotes.trim();
+    app.reviewedAt = nowIso();
+    app.updatedAt = nowIso();
+    await persistState();
+    return sendJson(res, 200, { application: { ...app, screening: evaluateApplication(app) } });
   }
 
   if (method === 'POST' && pathname === '/api/auth/login') {
@@ -797,7 +875,7 @@ async function serveRoleApp(req, res, url) {
 }
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
-const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/shell.js']);
+const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js']);
 async function serveStatic(req, res, url) {
   let requested = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
   if (!PUBLIC_FILES.has(requested)) return sendJson(res, 404, { error: 'Η σελίδα δεν βρέθηκε.' });
