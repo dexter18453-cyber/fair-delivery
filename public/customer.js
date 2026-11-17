@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let products = []; let cart = new Map(); let currentOrderId = null; let trackingTimer = null;
-let serviceFee = 0; let submitting = false;
+let serviceFee = 0; let deliveryFee = 0; let submitting = false;
 let deliveryMap = null; let deliveryMarker = null; let trackingMap = null; let trackingLayers = [];
 const DEFAULT_CENTER = [37.97, 23.67];
 function renderCart() {
@@ -12,7 +12,8 @@ function renderCart() {
   $('cart').innerHTML = rows.join('') || '<p class="hint">Το καλάθι είναι άδειο.</p>';
   $('subtotal').textContent = FD.money(subtotal);
   $('serviceFee').textContent = FD.money(rows.length ? serviceFee : 0);
-  $('total').textContent = FD.money(rows.length ? subtotal + serviceFee : 0);
+  $('deliveryFee').textContent = FD.money(rows.length ? deliveryFee : 0);
+  $('total').textContent = FD.money(rows.length ? subtotal + serviceFee + deliveryFee : 0);
   $('placeOrder').disabled = submitting || !rows.length;
   document.querySelectorAll('[data-plus]').forEach(b => b.onclick = () => changeQty(b.dataset.plus, 1));
   document.querySelectorAll('[data-minus]').forEach(b => b.onclick = () => changeQty(b.dataset.minus, -1));
@@ -35,9 +36,10 @@ function initDeliveryMap() {
 async function loadProducts() {
   const [menu, config] = await Promise.all([FD.api('/api/products'), FD.api('/api/config')]); products = menu.products;
   serviceFee = Number(config.settings.customerServiceFee);
+  deliveryFee = Number(config.settings.shopDeliveryFee || 0);
   $('products').innerHTML = products.map(p => `<article class="product product-card"><div><span class="eyebrow">${FD.esc(p.category || 'ΜΕΝΟΥ')}</span><h3>${FD.esc(p.name)}</h3><div class="hint">${FD.esc(p.description || '')}</div><div class="price">${FD.money(p.price)}</div></div><button data-add="${FD.esc(p.id)}">Προσθήκη</button></article>`).join('') || '<p class="hint">Δεν υπάρχουν διαθέσιμα προϊόντα.</p>';
   document.querySelectorAll('[data-add]').forEach(b => b.onclick = () => changeQty(b.dataset.add, 1));
-  $('feeNote').textContent = `Service fee πιλοτικού: ${FD.money(config.settings.customerServiceFee)} · Δεν γίνεται χρέωση online.`;
+  $('feeNote').textContent = `Χρέωση Fair Delivery: ${FD.money(serviceFee)} · Διανομή από το κατάστημα: ${FD.money(deliveryFee)} · Πιλοτική δοκιμή χωρίς online πληρωμή.`;
 }
 $('placeOrder').addEventListener('click', async () => {
   if (submitting) return;

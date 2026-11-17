@@ -22,6 +22,7 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || (process.env.RENDER ? '0.0.0.0' : '127.0.0.1');
 const DATA_DIR = path.resolve(__dirname, process.env.DATA_DIR || './data');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
+const DATABASE_URL = process.env.DATABASE_URL || '';
 const DEMO_MODE = process.env.DEMO_MODE === 'true' && process.env.NODE_ENV !== 'production';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const sessions = new Map();
@@ -31,7 +32,8 @@ const authWindows = new Map();
 
 const DEFAULT_SETTINGS = {
   currency: 'EUR',
-  customerServiceFee: 0.20,
+  customerServiceFee: 1.79,
+  shopDeliveryFee: 0,
   shopCommissionPercent: 0,
   riderBaseAmount: 2.50,
   riderPerKm: 0.80,
@@ -47,6 +49,24 @@ const DEFAULT_PRODUCTS = [
 
 let state;
 let writeQueue = Promise.resolve();
+let postgresPool = null;
+
+function normalizeState(parsed = {}) {
+  const settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) };
+  // This is a one-time pricing migration. Later admin edits must not be overridden.
+  if (settings.pricingVersion !== 2) {
+    settings.customerServiceFee = 1.79;
+    settings.shopCommissionPercent = 0;
+    settings.pricingVersion = 2;
+  }
+  return {
+    settings,
+    products: Array.isArray(parsed.products) ? parsed.products : DEFAULT_PRODUCTS,
+    orders: Array.isArray(parsed.orders) ? parsed.orders : [],
+    riders: parsed.riders && typeof parsed.riders === 'object' ? parsed.riders : {},
+    shopCredential: parsed.shopCredential || null
+  };
+}
 
 function round2(value) { return Math.round((Number(value) + Number.EPSILON) * 100) / 100; }
 function nowIso() { return new Date().toISOString(); }
@@ -54,6 +74,7 @@ function publicOrder(order) {
   if (!order) return null;
   return {
     id: order.id, items: order.items, subtotal: order.subtotal, serviceFee: order.serviceFee,
+    deliveryFee: order.deliveryFee || 0,
     total: order.total, status: order.status, createdAt: order.createdAt, updatedAt: order.updatedAt,
     estimatedKm: order.estimatedKm ?? null, badWeather: Boolean(order.badWeather),
     riderPayEstimate: order.riderPayEstimate ?? null,
@@ -70,6 +91,7 @@ function privateOrder(order) {
     customerName: order.customerName || '',
     customerPhone: order.customerPhone || '',
     deliveryAddress: order.deliveryAddress || '',
+    deliveryManagedByShop: Boolean(order.deliveryManagedByShop),
     assignedRider: order.assignedRider || null,
     assignedRiderName: rider?.name || order.assignedRiderName || null
   };
@@ -93,18 +115,31 @@ function hideRiderLocation(riderId) {
 }
 
 async function initState() {
+  if (DATABASE_URL) {
+    const { Pool } = require('pg');
+    postgresPool = new Pool({ connectionString: DATABASE_URL, max: 3, connectionTimeoutMillis: 7000 });
+    await postgresPool.query('CREATE TABLE IF NOT EXISTS fair_delivery_state (id INTEGER PRIMARY KEY CHECK (id = 1), body JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())');
+    // If a persistent record exists, it is always authoritative over ephemeral files.
+    const existing = await postgresPool.query('SELECT body FROM fair_delivery_state WHERE id = 1');
+    if (existing.rows.length) {
+      state = normalizeState(existing.rows[0].body);
+    } else {
+      let legacy = {};
+      try { legacy = JSON.parse(await fs.promises.readFile(STATE_FILE, 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      state = normalizeState(legacy);
+    }
+    await persistState();
+    return;
+  }
   await fs.promises.mkdir(DATA_DIR, { recursive: true });
   try {
     const parsed = JSON.parse(await fs.promises.readFile(STATE_FILE, 'utf8'));
-    state = {
-      settings: { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) },
-      products: Array.isArray(parsed.products) ? parsed.products : DEFAULT_PRODUCTS,
-      orders: Array.isArray(parsed.orders) ? parsed.orders : [],
-      riders: parsed.riders && typeof parsed.riders === 'object' ? parsed.riders : {}
-    };
+    state = normalizeState(parsed);
+    await persistState();
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    state = { settings: { ...DEFAULT_SETTINGS }, products: DEFAULT_PRODUCTS, orders: [], riders: {} };
+    state = normalizeState();
     await persistState();
   }
 }
@@ -112,6 +147,10 @@ async function initState() {
 function persistState() {
   const snapshot = JSON.stringify(state, null, 2);
   writeQueue = writeQueue.then(async () => {
+    if (postgresPool) {
+      await postgresPool.query('INSERT INTO fair_delivery_state (id, body) VALUES (1, $1::jsonb) ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body, updated_at = now()', [snapshot]);
+      return;
+    }
     const temp = `${STATE_FILE}.${process.pid}.tmp`;
     await fs.promises.writeFile(temp, snapshot, { mode: 0o600 });
     await fs.promises.rename(temp, STATE_FILE);
@@ -212,10 +251,37 @@ function roleCode(role) {
   return envName ? process.env[envName] : '';
 }
 
+async function shopCodeMatches(input) {
+  if (DEMO_MODE && input === 'demo') return true;
+  if (state.shopCredential?.codeSalt && state.shopCredential?.codeHash) {
+    const hash = await riderCodeHash(input, state.shopCredential.codeSalt);
+    return safeEqual(hash, state.shopCredential.codeHash);
+  }
+  return safeEqual(input, roleCode('shop'));
+}
+
 function validateMoney(value, name, max = 5000) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0 || n > max) throw Object.assign(new Error(`${name}: ποσό εκτός ορίων.`), { statusCode: 400 });
   return round2(n);
+}
+
+function offlineHelp(question) {
+  const q = question.toLocaleLowerCase('el-GR');
+  const fee = `${state.settings.customerServiceFee.toFixed(2).replace('.', ',')} ευρώ`;
+  if (/κωδικ|συνδε|λογαριασ|διανομ|rider/.test(q)) {
+    return `Σύνδεση: ο διαχειριστής μπαίνει στο Control Center. Από εκεί εκδίδει νέο κωδικό καταστήματος. Το κατάστημα δημιουργεί κάθε διανομέα και του δίνει προσωπικό ID και κωδικό. Οι διανομείς δεν έχουν κοινό κωδικό. ${postgresPool ? 'Η βάση PostgreSQL είναι ενεργή.' : 'ΠΡΟΣΟΧΗ: η βάση είναι προσωρινή· οι λογαριασμοί μπορεί να χαθούν μετά από restart.'}`;
+  }
+  if (/κοστο|χρεω|κερδ|φορο|φπα|τιμ|price|fee/.test(q)) {
+    return `Η δοκιμαστική χρέωση Fair Delivery είναι ${fee} ανά παραγγελία, με προμήθεια καταστήματος 0%. Η διανομή του καταστήματος είναι ${state.settings.shopDeliveryFee.toFixed(2).replace('.', ',')} ευρώ. Αυτά είναι μικτά ποσά, όχι καθαρό κέρδος. Για πραγματικούς φόρους, ΦΠΑ, παραστατικά και πληρωμές χρειάζεται λογιστική έγκριση πριν από εμπορική λειτουργία.`;
+  }
+  if (/παραγγελ|ακυρω|καταστημ|πελατ/.test(q)) {
+    return 'Η δοκιμαστική παραγγελία πηγαίνει από τον πελάτη στο κατάστημα: νέα → αποδοχή → ετοιμασία → ανάθεση στον διανομέα του καταστήματος → παραλαβή → παράδοση. Σε ακύρωση απαιτείται καταγραφή της αιτίας και, πριν από πραγματικές πληρωμές, ξεκάθαρη πολιτική επιστροφών.';
+  }
+  if (/ai|τεχνητ|openai|api/.test(q)) {
+    return 'Ο πραγματικός AI βοηθός ενεργοποιείται μόνο με OPENAI_API_KEY και OPENAI_MODEL στο Render. Η συνδρομή ChatGPT δεν αρκεί για το API και υπάρχει ξεχωριστή χρέωση. Μέχρι τότε λειτουργώ ως περιορισμένος οδηγός της εφαρμογής, χωρίς δημιουργία απαντήσεων από μοντέλο AI.';
+  }
+  return 'Αυτή τη στιγμή λειτουργώ ως βασικός οδηγός, όχι ως μοντέλο AI. Μπορώ να εξηγήσω: (1) σύνδεση καταστήματος και διανομέων, (2) ροή παραγγελίας, (3) χρεώσεις και φόρους, (4) σύνδεση OpenAI. Για ελεύθερες ερωτήσεις χρειάζεται ενεργή σύνδεση API.';
 }
 
 async function handleApi(req, res, url) {
@@ -223,7 +289,7 @@ async function handleApi(req, res, url) {
   const method = req.method;
 
   if (method === 'GET' && pathname === '/api/health') {
-    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.2.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_MODEL) });
+    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.3.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_MODEL), storage: postgresPool ? 'postgres' : 'temporary-file' });
   }
 
   if (method === 'POST' && pathname === '/api/auth/login') {
@@ -240,7 +306,7 @@ async function handleApi(req, res, url) {
       const riderId = String(body.riderId || '');
       const rider = state.riders[riderId];
       if (!rider || rider.active === false || !rider.codeSalt || !rider.codeHash) {
-        return sendJson(res, 401, { error: 'Δεν βρέθηκε ενεργός λογαριασμός διανομέα.' });
+        return sendJson(res, 401, { error: 'Αυτό το ID δεν ανήκει σε ενεργό διανομέα. Το κατάστημα πρέπει να δημιουργήσει νέο λογαριασμό ή να ελέγξει το ID. Οι παλιοί κωδικοί πριν από την έκδοση 1.2 δεν ισχύουν.' });
       }
       const suppliedHash = await riderCodeHash(String(body.code || ''), rider.codeSalt);
       if (!safeEqual(suppliedHash, rider.codeHash)) return sendJson(res, 401, { error: 'Λάθος κωδικός διανομέα.' });
@@ -249,13 +315,18 @@ async function handleApi(req, res, url) {
       riderName = rider.name;
     } else {
       const expected = roleCode(role);
-      if (!expected) return sendJson(res, 503, { error: `Δεν έχει οριστεί κωδικός πρόσβασης για τον ρόλο ${role}.` });
-      if (!safeEqual(String(body.code || ''), expected)) return sendJson(res, 401, { error: 'Λάθος κωδικός πρόσβασης.' });
+      if (role === 'shop') {
+        if (!state.shopCredential && !expected) return sendJson(res, 503, { error: 'Δεν υπάρχει κωδικός καταστήματος. Ο διαχειριστής μπορεί να δημιουργήσει νέο από το Control Center.' });
+        if (!(await shopCodeMatches(String(body.code || '')))) return sendJson(res, 401, { error: 'Λάθος κωδικός καταστήματος. Μπορείς να εκδώσεις νέο από το Control Center.' });
+      } else {
+        if (!expected) return sendJson(res, 503, { error: 'Δεν έχει οριστεί κωδικός διαχειριστή στον server.' });
+        if (!safeEqual(String(body.code || ''), expected)) return sendJson(res, 401, { error: 'Λάθος κωδικός διαχειριστή.' });
+      }
     }
 
     const token = crypto.randomBytes(32).toString('hex');
     sessions.set(token, { role, userId, storeId, expiresAt: Date.now() + SESSION_TTL_MS });
-    const secure = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+    const secure = process.env.NODE_ENV === 'production' || process.env.RENDER ? '; Secure' : '';
     return sendJson(res, 200, { ok: true, role, userId, riderName, expiresInSeconds: SESSION_TTL_MS / 1000 }, { 'Set-Cookie': `fd_${role}_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}${secure}` });
   }
 
@@ -287,6 +358,48 @@ async function handleApi(req, res, url) {
 
   if (method === 'GET' && pathname === '/api/products') {
     return sendJson(res, 200, { products: state.products.filter(p => p.active) });
+  }
+
+  if (pathname === '/api/shop/products' && ['GET', 'POST'].includes(method)) {
+    const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
+    if (method === 'GET') return sendJson(res, 200, { products: state.products });
+    const body = await readJson(req, 4096);
+    if (state.products.length >= 200) return sendJson(res, 409, { error: 'Το πιλοτικό δέχεται έως 200 προϊόντα.' });
+    const name = String(body.name || '').trim();
+    const category = String(body.category || 'Μενού').trim();
+    const description = String(body.description || '').trim();
+    if (name.length < 2 || name.length > 100 || !category || category.length > 60 || description.length > 500) return sendJson(res, 400, { error: 'Έλεγξε όνομα, κατηγορία και περιγραφή προϊόντος.' });
+    if (typeof body.price !== 'number') return sendJson(res, 400, { error: 'Δώσε έγκυρη τιμή προϊόντος.' });
+    const product = { id: crypto.randomUUID(), name, category, description, price: validateMoney(body.price, 'Τιμή προϊόντος'), active: body.active !== false };
+    state.products.push(product);
+    await persistState();
+    return sendJson(res, 201, { product });
+  }
+
+  const productMutation = pathname.match(/^\/api\/shop\/products\/([a-zA-Z0-9-]+)$/);
+  if (method === 'PATCH' && productMutation) {
+    const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
+    const product = state.products.find(p => p.id === productMutation[1]);
+    if (!product) return sendJson(res, 404, { error: 'Το προϊόν δεν βρέθηκε.' });
+    const body = await readJson(req, 4096);
+    const updated = { ...product };
+    for (const key of ['name', 'category', 'description']) if (body[key] !== undefined) {
+      if (typeof body[key] !== 'string') return sendJson(res, 400, { error: 'Μη έγκυρο κείμενο προϊόντος.' });
+      const v = body[key].trim();
+      if ((key === 'name' && (v.length < 2 || v.length > 100)) || (key === 'category' && (!v || v.length > 60)) || (key === 'description' && v.length > 500)) return sendJson(res, 400, { error: 'Μη έγκυρο όνομα, κατηγορία ή περιγραφή.' });
+      updated[key] = v;
+    }
+    if (body.price !== undefined) {
+      if (typeof body.price !== 'number') return sendJson(res, 400, { error: 'Μη έγκυρη τιμή.' });
+      updated.price = validateMoney(body.price, 'Τιμή προϊόντος');
+    }
+    if (body.active !== undefined) {
+      if (typeof body.active !== 'boolean') return sendJson(res, 400, { error: 'Η διαθεσιμότητα πρέπει να είναι ναι ή όχι.' });
+      updated.active = body.active;
+    }
+    Object.assign(product, updated);
+    await persistState();
+    return sendJson(res, 200, { product });
   }
 
   if (method === 'POST' && pathname === '/api/orders') {
@@ -322,10 +435,11 @@ async function handleApi(req, res, url) {
       id: crypto.randomUUID(), storeId: 'default', items: lines, subtotal,
       customerName, customerPhone, deliveryAddress,
       deliveryLocation: { lat: deliveryLat, lng: deliveryLng },
-      serviceFee: round2(state.settings.customerServiceFee), total: round2(subtotal + state.settings.customerServiceFee),
+      serviceFee: round2(state.settings.customerServiceFee), deliveryFee: round2(state.settings.shopDeliveryFee),
+      total: round2(subtotal + state.settings.customerServiceFee + state.settings.shopDeliveryFee),
       status: 'new', createdAt: nowIso(), updatedAt: nowIso(),
       estimatedKm: null, badWeather: false, riderPayEstimate: null,
-      assignedRider: null, assignedRiderName: null, riderLocation: null
+      assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
     };
     state.orders.push(order); await persistState();
     return sendJson(res, 201, { order: publicOrder(order), trackingUrl: `/customer-app.html?order=${encodeURIComponent(order.id)}` });
@@ -354,19 +468,23 @@ async function handleApi(req, res, url) {
     if (session.role === 'shop' && (order.storeId || 'default') !== session.storeId) return sendJson(res, 403, { error: 'Η παραγγελία ανήκει σε άλλο κατάστημα.' });
     const status = String(body.status || '');
     const transitions = {
-      shop: { new: ['accepted', 'cancelled'], accepted: ['ready'], ready: ['assigned'] },
+      shop: { new: ['accepted', 'cancelled'], accepted: ['ready', 'cancelled'], ready: ['assigned', 'cancelled'], assigned: ['delivered'] },
       rider: { assigned: ['picked_up'], picked_up: ['delivered'] },
       admin: { new: ['accepted', 'cancelled'], accepted: ['ready', 'cancelled'], ready: ['assigned', 'cancelled'], assigned: ['picked_up', 'cancelled'], picked_up: ['delivered', 'cancelled'] }
     };
     if (!(transitions[session.role]?.[order.status] || []).includes(status)) return sendJson(res, 409, { error: `Δεν επιτρέπεται η μετάβαση ${order.status} → ${status} για τον ρόλο ${session.role}.` });
     if (session.role === 'rider' && order.assignedRider !== session.userId) return sendJson(res, 403, { error: 'Η παραγγελία δεν έχει ανατεθεί στον δικό σου λογαριασμό.' });
+    if (session.role === 'shop' && status === 'delivered' && !order.deliveryManagedByShop) return sendJson(res, 403, { error: 'Την παράδοση αυτή πρέπει να ολοκληρώσει ο συνδεδεμένος διανομέας.' });
     let assignedRider = null;
+    const shopManagedDelivery = status === 'assigned' && body.storeDelivery === true;
     if (status === 'assigned') {
       if (!['shop', 'admin'].includes(session.role)) return sendJson(res, 403, { error: 'Η ανάθεση γίνεται από το κατάστημα.' });
-      const riderId = String(body.riderId || '');
-      const rider = state.riders[riderId];
-      if (!rider || rider.active === false || rider.storeId !== (session.storeId || 'default')) return sendJson(res, 400, { error: 'Επίλεξε ενεργό διανομέα του καταστήματος.' });
-      assignedRider = rider;
+      if (!shopManagedDelivery) {
+        const riderId = String(body.riderId || '');
+        const rider = state.riders[riderId];
+        if (!rider || rider.active === false || rider.storeId !== (session.storeId || 'default')) return sendJson(res, 400, { error: 'Επίλεξε ενεργό διανομέα του καταστήματος.' });
+        assignedRider = rider;
+      }
     }
     let estimatedKm = order.estimatedKm;
     if (body.estimatedKm !== undefined) {
@@ -377,8 +495,9 @@ async function handleApi(req, res, url) {
     if (body.badWeather !== undefined && typeof body.badWeather !== 'boolean') return sendJson(res, 400, { error: 'Η ένδειξη κακοκαιρίας πρέπει να είναι true ή false.' });
     order.estimatedKm = estimatedKm;
     if (assignedRider) { order.assignedRider = assignedRider.id; order.assignedRiderName = assignedRider.name; }
+    if (status === 'assigned') order.deliveryManagedByShop = shopManagedDelivery;
     if (body.badWeather !== undefined) order.badWeather = body.badWeather;
-    if (status === 'delivered' && Number.isFinite(order.estimatedKm)) {
+    if (status === 'delivered' && !order.deliveryManagedByShop && Number.isFinite(order.estimatedKm)) {
       order.riderPayEstimate = round2(state.settings.riderBaseAmount + order.estimatedKm * state.settings.riderPerKm + (order.badWeather ? state.settings.badWeatherBonus : 0));
     }
     order.status = status; order.updatedAt = nowIso();
@@ -397,26 +516,37 @@ async function handleApi(req, res, url) {
       deliveredToday: todayOrders.filter(o => o.status === 'delivered').length,
       grossValueToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal, 0)),
       shopsCommissionToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal * state.settings.shopCommissionPercent / 100, 0)),
-      riderCountOnline: Object.values(state.riders).filter(r => r.online).length
+      riderCountOnline: Object.values(state.riders).filter(r => r.online).length,
+      platformFeeToday: round2(todayOrders.filter(o => o.status === 'delivered').reduce((s, o) => s + o.serviceFee, 0))
     });
   }
 
   if (method === 'PATCH' && pathname === '/api/settings') {
     const session = requireRole(req, res, ['admin']); if (!session) return;
     const body = await readJson(req, 4096);
-    const allowed = ['customerServiceFee', 'shopCommissionPercent', 'riderBaseAmount', 'riderPerKm', 'badWeatherBonus'];
+    const allowed = ['customerServiceFee', 'shopDeliveryFee', 'shopCommissionPercent', 'riderBaseAmount', 'riderPerKm', 'badWeatherBonus'];
     const settings = { ...state.settings };
     for (const key of allowed) {
       if (body[key] !== undefined) {
         const value = Number(body[key]);
         const max = key === 'shopCommissionPercent' ? 100 : 1000;
         if (!Number.isFinite(value) || value < 0 || value > max) return sendJson(res, 400, { error: `Μη έγκυρη τιμή για ${key}.` });
+        if (key === 'shopCommissionPercent' && value !== 0) return sendJson(res, 400, { error: 'Στο πιλοτικό Fair Delivery η προμήθεια καταστήματος παραμένει 0%.' });
         settings[key] = round2(value);
       }
     }
     state.settings = settings;
     await persistState();
     return sendJson(res, 200, { settings: state.settings });
+  }
+
+  if (method === 'POST' && pathname === '/api/admin/shop-code') {
+    const session = requireRole(req, res, ['admin']); if (!session) return;
+    const accessCode = crypto.randomBytes(18).toString('base64url');
+    const codeSalt = crypto.randomBytes(16).toString('hex');
+    state.shopCredential = { codeSalt, codeHash: await riderCodeHash(accessCode, codeSalt), updatedAt: nowIso() };
+    await persistState();
+    return sendJson(res, 200, { accessCode, warning: postgresPool ? null : 'Προσοχή: χωρίς μόνιμη βάση ο κωδικός χάνεται σε νέο deployment.' });
   }
 
   if ((method === 'GET' || method === 'POST') && pathname === '/api/shop/riders') {
@@ -439,6 +569,21 @@ async function handleApi(req, res, url) {
     return sendJson(res, 201, { rider: { id, name, active: true, online: false }, accessCode });
   }
 
+  const resetRiderCode = pathname.match(/^\/api\/shop\/riders\/([0-9a-f-]+)\/reset-code$/i);
+  if (method === 'POST' && resetRiderCode) {
+    const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
+    const rider = state.riders[resetRiderCode[1]];
+    if (!rider || (rider.storeId || 'default') !== session.storeId) return sendJson(res, 404, { error: 'Ο διανομέας δεν βρέθηκε στο κατάστημα.' });
+    const accessCode = crypto.randomBytes(12).toString('base64url');
+    const codeSalt = crypto.randomBytes(16).toString('hex');
+    rider.codeSalt = codeSalt;
+    rider.codeHash = await riderCodeHash(accessCode, codeSalt);
+    rider.updatedAt = nowIso();
+    for (const [token, oldSession] of sessions) if (oldSession.role === 'rider' && oldSession.userId === rider.id) sessions.delete(token);
+    await persistState();
+    return sendJson(res, 200, { riderId: rider.id, accessCode, warning: postgresPool ? null : 'Χωρίς μόνιμη βάση ο κωδικός μπορεί να χαθεί σε νέο deployment.' });
+  }
+
   if (method === 'POST' && pathname === '/api/shop/location') {
     const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
     const body = await readJson(req, 4096);
@@ -447,6 +592,15 @@ async function handleApi(req, res, url) {
     state.settings.storeLocation = { lat, lng, updatedAt: nowIso() };
     await persistState();
     return sendJson(res, 200, { storeLocation: state.settings.storeLocation });
+  }
+
+  if (method === 'POST' && pathname === '/api/shop/delivery-fee') {
+    const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
+    const body = await readJson(req, 4096);
+    if (typeof body.deliveryFee !== 'number') return sendJson(res, 400, { error: 'Δώσε το κόστος διανομής σε ευρώ.' });
+    state.settings.shopDeliveryFee = validateMoney(body.deliveryFee, 'Κόστος διανομής', 50);
+    await persistState();
+    return sendJson(res, 200, { deliveryFee: state.settings.shopDeliveryFee });
   }
 
   if (method === 'GET' && pathname === '/api/rider/profile') {
@@ -479,11 +633,11 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && pathname === '/api/assistant') {
     const session = requireRole(req, res, ['admin']); if (!session) return;
-    if (!process.env.OPENAI_API_KEY || !process.env.OPENAI_MODEL) return sendJson(res, 503, { error: 'Ο AI βοηθός δεν έχει ρυθμιστεί στον server. Πρόσθεσε OPENAI_API_KEY και OPENAI_MODEL στα server environment variables.' });
     if (!rateLimit(aiWindows, session.userId, Number(process.env.AI_MAX_REQUESTS_PER_10_MIN || 10), 10 * 60 * 1000)) return sendJson(res, 429, { error: 'Έφτασες το όριο ερωτήσεων. Δοκίμασε ξανά σε λίγο.' });
     const body = await readJson(req, 12 * 1024);
     const message = typeof body.message === 'string' ? body.message.trim() : '';
     if (!message || message.length > 2000) return sendJson(res, 400, { error: 'Γράψε ερώτηση έως 2.000 χαρακτήρες.' });
+    if (!process.env.OPENAI_API_KEY || !process.env.OPENAI_MODEL) return sendJson(res, 200, { answer: offlineHelp(message), mode: 'guide' });
     const history = Array.isArray(body.history) ? body.history.slice(-8).map(m => ({ role: m?.role === 'assistant' ? 'assistant' : 'user', content: String(m?.content || '').slice(0, 1000) })).filter(m => m.content) : [];
     const instructions = [
       'Είσαι ο τεχνικός βοηθός του ανεξάρτητου project Fair Delivery. Απαντάς στα ελληνικά, με πρακτικά μικρά βήματα.',
@@ -501,7 +655,7 @@ async function handleApi(req, res, url) {
       const result = await apiResponse.json().catch(() => ({}));
       if (!apiResponse.ok) return sendJson(res, 502, { error: result?.error?.message || `AI provider HTTP ${apiResponse.status}` });
       const answer = result.output_text || (result.output || []).flatMap(item => item.content || []).filter(c => c.type === 'output_text').map(c => c.text).join('\n').trim();
-      return answer ? sendJson(res, 200, { answer }) : sendJson(res, 502, { error: 'Ο AI πάροχος δεν επέστρεψε απάντηση.' });
+      return answer ? sendJson(res, 200, { answer, mode: 'ai' }) : sendJson(res, 502, { error: 'Ο AI πάροχος δεν επέστρεψε απάντηση.' });
     } catch (error) {
       return sendJson(res, 502, { error: 'Δεν ήταν δυνατή η σύνδεση με τον AI πάροχο.' });
     }

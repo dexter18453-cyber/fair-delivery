@@ -28,7 +28,7 @@ test('checkout shows the final fee-inclusive amount, tolerates a missing map, an
       money, esc: value => String(value), status: value => value, notice() {},
       api: async endpoint => {
         if (endpoint === '/api/products') return { products: [{ id: 'test-product', name: 'Test', price: 4.9 }] };
-        if (endpoint === '/api/config') return { settings: { customerServiceFee: 0.2 } };
+        if (endpoint === '/api/config') return { settings: { customerServiceFee: 1.79, shopDeliveryFee: 2 } };
         if (endpoint === '/api/orders') { orderRequests++; return new Promise(resolve => { completeOrder = resolve; }); }
         return { order: { id: 'test-order', total: 10, status: 'delivered', createdAt: new Date().toISOString() } };
       }
@@ -38,8 +38,9 @@ test('checkout shows the final fee-inclusive amount, tolerates a missing map, an
   await new Promise(setImmediate);
   vm.runInContext("changeQty('test-product', 2)", context);
   assert.equal(node('subtotal').textContent, money(9.8));
-  assert.equal(node('serviceFee').textContent, money(0.2));
-  assert.equal(node('total').textContent, money(10));
+  assert.equal(node('serviceFee').textContent, money(1.79));
+  assert.equal(node('deliveryFee').textContent, money(2));
+  assert.equal(node('total').textContent, money(13.59));
   node('customerName').value = 'Test Customer'; node('customerPhone').value = '6900000000';
   node('deliveryAddress').value = 'Test Street 10'; node('privacyConsent').checked = true;
   node('useLocation').onclick();

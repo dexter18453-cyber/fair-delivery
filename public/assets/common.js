@@ -12,6 +12,6 @@ const FD = {
   async me(role) { return this.api('/api/auth/me', { headers: role ? { 'X-FD-Role': role } : {} }); },
   money(value) { return new Intl.NumberFormat('el-GR', { style: 'currency', currency: 'EUR' }).format(Number(value || 0)); },
   esc(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); },
-  status(value) { return ({ new: 'Νέα', accepted: 'Αποδεκτή από κατάστημα', ready: 'Έτοιμη για διανομή', assigned: 'Ανατέθηκε σε διανομέα', picked_up: 'Παραλήφθηκε', delivered: 'Παραδόθηκε', cancelled: 'Ακυρώθηκε' })[value] || value; },
+  status(value) { return ({ new: 'Νέα', accepted: 'Αποδεκτή από κατάστημα', ready: 'Έτοιμη για διανομή', assigned: 'Έφυγε για παράδοση', picked_up: 'Παραλήφθηκε', delivered: 'Παραδόθηκε', cancelled: 'Ακυρώθηκε' })[value] || value; },
   notice(id, message, error = false) { const node = document.getElementById(id); if (!node) return; node.textContent = message; node.className = error ? 'notice error' : 'notice'; node.classList.toggle('hidden', !message); }
 };

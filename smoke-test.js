@@ -16,7 +16,7 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
 (async () => {
  try {
   await waitServer();
-  const health = await api('/api/health'); assert.equal(health.ok, true); assert.equal(health.version, '1.2.0');
+  const health = await api('/api/health'); assert.equal(health.ok, true); assert.equal(health.version, '1.3.0');
   const html = await fetch(base + '/'); assert.equal(html.status, 200); assert.match(await html.text(), /Fair Delivery/);
   for (const file of ['/admin.js','/customer.js','/shop.js','/rider.js','/assets/app.css','/assets/common.js','/customer-app.html','/shop-app.html','/Rider-App.html']) { const asset = await fetch(base + file); assert.equal(asset.status, 200, `static asset not served: ${file}`); }
   await login('shop');
