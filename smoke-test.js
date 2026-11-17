@@ -20,12 +20,22 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   const html = await fetch(base + '/'); assert.equal(html.status, 200); assert.match(await html.text(), /Fair Delivery/);
   for (const file of ['/admin.js','/customer.js','/shop.js','/rider.js','/assets/app.css','/assets/common.js','/customer-app.html','/shop-app.html','/Rider-App.html']) { const asset = await fetch(base + file); assert.equal(asset.status, 200, `static asset not served: ${file}`); }
   await login('shop');
+  assert.equal((await api('/api/config')).settings.customerServiceFee, 1.79);
   const created = await api('/api/shop/riders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Test Rider' }) });
   assert.ok(created.rider.id); assert.ok(created.accessCode);
   const riderList = await api('/api/shop/riders'); assert.equal(riderList.riders.length, 1); assert.equal(riderList.riders[0].id, created.rider.id);
   const menu = await api('/api/products'); assert.ok(menu.products.length >= 1);
+  const createdProduct = await api('/api/shop/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Test Souvlaki', category: 'Φαγητό', price: 4.5, description: 'Test product' }) });
+  assert.equal(createdProduct.product.active, true);
+  const hiddenProduct = await api(`/api/shop/products/${createdProduct.product.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ active: false }) });
+  assert.equal(hiddenProduct.product.active, false);
+  assert.equal((await api('/api/products')).products.some(p => p.id === createdProduct.product.id), false);
+  await api('/api/shop/delivery-fee', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deliveryFee: 1.5 }) });
   const orderResult = await api('/api/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [{ productId: menu.products[0].id, qty: 2 }], customerName: 'Test Customer', customerPhone: '6900000000', deliveryAddress: 'Test Street 10, Athens', deliveryLocation: { lat: 37.98, lng: 23.72 }, privacyConsent: true }) });
   const id = orderResult.order.id; assert.equal(orderResult.order.status, 'new'); assert.deepEqual(orderResult.order.deliveryLocation, { lat: 37.98, lng: 23.72 });
+  assert.equal(orderResult.order.serviceFee, 1.79);
+  assert.equal(orderResult.order.deliveryFee, 1.5);
+  assert.equal(orderResult.order.total, 13.09);
   await api(`/api/orders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'accepted' }) });
   await api(`/api/orders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'ready' }) });
   const assigned = await api(`/api/orders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'assigned', riderId: created.rider.id }) });
@@ -41,8 +51,17 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   await api(`/api/orders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'picked_up' }) });
   const delivered = await api(`/api/orders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'delivered', estimatedKm: 2.8, badWeather: true }) });
   assert.equal(delivered.order.status, 'delivered'); assert.equal(delivered.order.riderPayEstimate, 6.24);
-  await login('admin'); const stats = await api('/api/stats'); assert.equal(stats.ordersToday, 1); assert.equal(stats.deliveredToday, 1);
-  const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8')); assert.equal(saved.orders.length, 1); assert.ok(saved.riders[created.rider.id].codeHash);
+  const shopDelivery = await api('/api/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [{ productId: menu.products[0].id, qty: 1 }], customerName: 'Second Customer', customerPhone: '6900000001', deliveryAddress: 'Second Street 11, Athens', deliveryLocation: { lat: 37.98, lng: 23.72 }, privacyConsent: true }) });
+  activeRole = 'shop';
+  for (const status of ['accepted', 'ready']) await api(`/api/orders/${shopDelivery.order.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
+  const managed = await api(`/api/orders/${shopDelivery.order.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'assigned', storeDelivery: true }) });
+  assert.equal(managed.order.deliveryManagedByShop, true);
+  const finished = await api(`/api/orders/${shopDelivery.order.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'delivered' }) });
+  assert.equal(finished.order.status, 'delivered');
+  await login('admin'); const stats = await api('/api/stats'); assert.equal(stats.ordersToday, 2); assert.equal(stats.deliveredToday, 2);
+  assert.equal(stats.platformFeeToday, 3.58);
+  const shopCode = await api('/api/admin/shop-code', { method: 'POST' }); assert.ok(shopCode.accessCode);
+  const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8')); assert.equal(saved.orders.length, 2); assert.ok(saved.riders[created.rider.id].codeHash); assert.ok(saved.shopCredential.codeHash);
   console.log('PASS: health, static assets, shop login, stable rider account, individual rider credentials, checkout contact/address/map pin, shop assignment, rider-only assigned orders, GPS update, privacy-safe tracking, delivery workflow, payout estimate, admin stats and persistence.');
  } catch (e) { console.error('FAIL:', e); process.exitCode = 1; }
  finally { child.kill('SIGTERM'); setTimeout(() => { try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch {} }, 1000); }

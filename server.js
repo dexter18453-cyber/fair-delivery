@@ -115,6 +115,9 @@ function hideRiderLocation(riderId) {
 }
 
 async function initState() {
+  if (process.env.RENDER && !DATABASE_URL) {
+    throw new Error('Ασφαλής εκκίνηση: απαιτείται DATABASE_URL σε Render. Χωρίς μόνιμη βάση η νέα έκδοση θα έχανε λογαριασμούς και παραγγελίες.');
+  }
   if (DATABASE_URL) {
     const { Pool } = require('pg');
     postgresPool = new Pool({ connectionString: DATABASE_URL, max: 3, connectionTimeoutMillis: 7000 });
@@ -127,6 +130,9 @@ async function initState() {
       let legacy = {};
       try { legacy = JSON.parse(await fs.promises.readFile(STATE_FILE, 'utf8')); }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (process.env.RENDER && !Object.keys(legacy).length && process.env.ALLOW_EMPTY_PRODUCTION_STATE !== 'true') {
+        throw new Error('Ασφαλής εκκίνηση: η PostgreSQL δεν περιέχει δεδομένα. Πρώτα μετέφερε το παλιό state ή όρισε συνειδητά ALLOW_EMPTY_PRODUCTION_STATE=true για εντελώς νέο πιλοτικό περιβάλλον.');
+      }
       state = normalizeState(legacy);
     }
     await persistState();
