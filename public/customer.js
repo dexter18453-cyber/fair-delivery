@@ -98,7 +98,7 @@ function renderTrackingMap(order) {
   if (points.length) trackingMap.fitBounds(L.latLngBounds(points).pad(.25));
   setTimeout(() => trackingMap.invalidateSize(), 120);
 }
-async function showTracking(id) { currentOrderId = id; if (window.FDUI?.show) window.FDUI.show('tracking'); $('tracking').classList.remove('hidden'); $('orderId').textContent = id; $('trackingInfo').textContent = 'Γίνεται έλεγχος κατάστασης…'; if (trackingTimer) clearInterval(trackingTimer); trackingTimer = setInterval(refreshTracking, 7000); await refreshTracking(); }
+async function showTracking(id) { currentOrderId = id; $('trackingEmpty')?.classList.add('hidden'); if (window.FDUI?.show) window.FDUI.show('tracking'); $('tracking').classList.remove('hidden'); $('orderId').textContent = id; $('trackingInfo').textContent = 'Γίνεται έλεγχος κατάστασης…'; if (trackingTimer) clearInterval(trackingTimer); trackingTimer = setInterval(refreshTracking, 7000); await refreshTracking(); }
 async function refreshTracking() {
   if (!currentOrderId) return;
   try {
