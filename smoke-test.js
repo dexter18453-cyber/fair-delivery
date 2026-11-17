@@ -19,6 +19,37 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   const health = await api('/api/health'); assert.equal(health.ok, true); assert.equal(health.version, '1.3.0');
   const html = await fetch(base + '/'); assert.equal(html.status, 200); assert.match(await html.text(), /Fair Delivery/);
   for (const file of ['/admin.js','/customer.js','/shop.js','/rider.js','/assets/app.css','/assets/common.js','/customer-app.html','/shop-app.html','/Rider-App.html']) { const asset = await fetch(base + file); assert.equal(asset.status, 200, `static asset not served: ${file}`); }
+  const manifests = [];
+  for (const role of ['shop','rider','admin']) {
+    const root = '/app/' + role + '/';
+    const document = await fetch(base + root);
+    assert.equal(document.status,200,'Role page failed: '+role);
+    const html = await document.text();
+    assert.match(html,new RegExp('/app/'+role+'/manifest\\.webmanifest'));
+    assert.match(html,/assets\\/pwa\\.js/);
+    const response = await fetch(base+root+'manifest.webmanifest');
+    assert.equal(response.status,200);
+    assert.match(response.headers.get('content-type'),/manifest/);
+    const manifest=await response.json();
+    manifests.push(manifest.id);
+    assert.equal(manifest.start_url,root);
+    assert.equal(manifest.scope,root);
+    assert.equal(manifest.display,'standalone');
+    for (const size of [192,512]) {
+      const icon=await fetch(base+root+'icon-'+size+'.png');
+      assert.equal(icon.status,200);
+      assert.match(icon.headers.get('content-type'),/image\\/png/);
+      const bytes=Buffer.from(await icon.arrayBuffer());
+      assert.equal(bytes.readUInt32BE(0),0x89504e47);
+      assert.equal(bytes.readUInt32BE(16),size);
+      assert.equal(bytes.readUInt32BE(20),size);
+    }
+    const worker=await fetch(base+root+'sw.js');
+    assert.equal(worker.status,200);
+    assert.match(await worker.text(),/navigate/);
+  }
+  assert.equal(new Set(manifests).size,3,'Installed apps must have distinct IDs');
+  assert.equal((await fetch(base+'/app/not-a-role/')).status,404);
   await login('shop');
   assert.equal((await api('/api/config')).settings.customerServiceFee, 1.79);
   const created = await api('/api/shop/riders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Test Rider' }) });

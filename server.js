@@ -689,8 +689,107 @@ async function handleApi(req, res, url) {
   return sendJson(res, 404, { error: 'API endpoint δεν βρέθηκε.' });
 }
 
+
+// Each role has its own installable PWA scope and identity, while APIs and PostgreSQL remain shared.
+const ROLE_PWAS = {
+  shop: { name: 'Fair Delivery Store', short: 'FD Store', label: 'Κατάστημα', color: '#ee3c52', page: '/shop-app.html' },
+  rider: { name: 'Fair Delivery Rider', short: 'FD Rider', label: 'Διανομέας', color: '#ff5949', page: '/Rider-App.html' },
+  admin: { name: 'Fair Delivery Admin', short: 'FD Admin', label: 'Διαχείριση', color: '#da385e', page: '/index.html' }
+};
+const pwaIconCache = new Map();
+function pngCrc(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let b = 0; b < 8; b++) crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+function pngChunk(type, bytes) {
+  const name = Buffer.from(type);
+  const size = Buffer.alloc(4); size.writeUInt32BE(bytes.length);
+  const code = Buffer.alloc(4); code.writeUInt32BE(pngCrc(Buffer.concat([name, bytes])));
+  return Buffer.concat([size, name, bytes, code]);
+}
+function roleIconPng(role, size) {
+  const cacheKey = role + ':' + size;
+  if (pwaIconCache.has(cacheKey)) return pwaIconCache.get(cacheKey);
+  const { deflateSync } = require('node:zlib');
+  const pixels = Buffer.alloc(size * (1 + 4 * size));
+  const inside = (x, y, left, top, right, bottom) => x >= left && x <= right && y >= top && y <= bottom;
+  const circle = (x, y, cx, cy, r) => (x - cx) ** 2 + (y - cy) ** 2 <= r ** 2;
+  for (let y = 0; y < size; y++) {
+    const scan = y * (1 + size * 4);
+    for (let x = 0; x < size; x++) {
+      const u = (x + 0.5) / size, v = (y + 0.5) / size, idx = scan + 1 + x * 4;
+      const glow = Math.max(0, 1 - Math.hypot(u - 0.8, v - 0.15) * 1.45);
+      let r = Math.round(11 + glow * 36), g = Math.round(15 + glow * 7), b = Math.round(25 + glow * 15);
+      // Rounded app tile and soft interior highlight.
+      if (inside(u, v, .06, .06, .94, .94) && circle(u < .2 ? .2 : u > .8 ? .8 : u, v < .2 ? .2 : v > .8 ? .8 : v, .5, .5, .46)) {
+        r += 7; g += 5; b += 8;
+      }
+      let accent = false, white = false;
+      const ring = circle(u,v,.5,.5,.35) && !circle(u,v,.5,.5,.332);
+      accent = ring;
+      if (role === 'shop') {
+        accent ||= inside(u,v,.235,.37,.765,.49) || inside(u,v,.25,.53,.30,.76) || inside(u,v,.70,.53,.75,.76) || inside(u,v,.25,.72,.75,.77);
+        white ||= inside(u,v,.31,.53,.44,.68) || inside(u,v,.49,.53,.66,.71) && !inside(u,v,.55,.62,.60,.71);
+        // Storefront awning stripes.
+        white ||= inside(u,v,.33,.38,.38,.48) || inside(u,v,.46,.38,.51,.48) || inside(u,v,.59,.38,.64,.48);
+      } else if (role === 'rider') {
+        accent ||= circle(u,v,.33,.69,.095) || circle(u,v,.68,.69,.095);
+        if (circle(u,v,.33,.69,.052) || circle(u,v,.68,.69,.052)) {accent=false;white=true;}
+        accent ||= inside(u,v,.34,.55,.67,.60) || inside(u,v,.50,.49,.62,.56) || inside(u,v,.59,.43,.64,.51) || inside(u,v,.45,.41,.57,.46);
+        white ||= inside(u,v,.35,.50,.49,.54);
+      } else {
+        accent ||= inside(u,v,.29,.58,.38,.73) || inside(u,v,.44,.48,.53,.73) || inside(u,v,.59,.36,.68,.73);
+        accent ||= inside(u,v,.25,.75,.74,.79);
+        white ||= circle(u,v,.65,.32,.055);
+      }
+      if (accent) { r = role === 'rider' ? 255 : role === 'admin' ? 230 : 239; g = role === 'rider' ? 89 : 57; b = role === 'rider' ? 73 : role === 'shop' ? 82 : 105; }
+      if (white) {r=245;g=246;b=250;}
+      pixels[idx] = r; pixels[idx+1] = g; pixels[idx+2] = b; pixels[idx+3] = 255;
+    }
+  }
+  const header = Buffer.alloc(13); header.writeUInt32BE(size,0);header.writeUInt32BE(size,4);header[8]=8;header[9]=6;
+  const png = Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),pngChunk('IHDR',header),pngChunk('IDAT',deflateSync(pixels,{level:9})),pngChunk('IEND',Buffer.alloc(0))]);
+  pwaIconCache.set(cacheKey,png);
+  return png;
+}
+async function serveRoleApp(req, res, url) {
+  const match = /^\/app\/(shop|rider|admin)\/(manifest\.webmanifest|sw\.js|icon-(192|512)\.png|offline\.html)?$/.exec(url.pathname);
+  if (!match) return false;
+  if (!['GET','HEAD'].includes(req.method)) { sendJson(res,405,{ error:'Μη επιτρεπτή μέθοδος.' }); return true; }
+  const role = match[1], asset = match[2] || '', config = ROLE_PWAS[role], scope = '/app/' + role + '/';
+  if (!asset) {
+    await serveStatic(req,res,{pathname:config.page}); return true;
+  }
+  let content, mime, cacheControl = 'no-store';
+  if (asset === 'manifest.webmanifest') {
+    content = JSON.stringify({
+      id: scope, name: config.name, short_name: config.short, description: 'Fair Delivery — ' + config.label,
+      lang: 'el', start_url: scope, scope, display: 'standalone', background_color: '#0a0d15',
+      theme_color: config.color, orientation: 'any',
+      icons: [192,512].map(size => ({ src:scope+'icon-'+size+'.png', sizes:size+'x'+size, type:'image/png', purpose:'any maskable' }))
+    });
+    mime='application/manifest+json; charset=utf-8';
+  } else if (/^icon-(192|512)\.png$/.test(asset)) {
+    content=roleIconPng(role,Number(asset.match(/\d+/)[0]));
+    mime='image/png';cacheControl='public, max-age=604800, immutable';
+  } else if (asset === 'sw.js') {
+    content = `'use strict';const OFFLINE='${scope}offline.html';const CACHE='fd-pwa-${role}-offline-v1';self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.add(OFFLINE)).then(()=>self.skipWaiting()));});self.addEventListener('activate',event=>{event.waitUntil(self.clients.claim());});self.addEventListener('fetch',event=>{const url=new URL(event.request.url);if(event.request.mode!=='navigate'||url.origin!==self.location.origin||!url.pathname.startsWith('${scope}'))return;event.respondWith(fetch(event.request).catch(()=>caches.match(OFFLINE)));});`;
+    mime='application/javascript; charset=utf-8';
+  } else {
+    content = `<!doctype html><html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Fair Delivery — Χωρίς σύνδεση</title><style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#0a0d15;color:#fff;font:16px system-ui;text-align:center;padding:24px}section{max-width:400px}a{color:#ff6b76}</style></head><body><section><h1>Fair Delivery ${config.label}</h1><p>Δεν υπάρχει σύνδεση στο διαδίκτυο. Για τις ζωντανές παραγγελίες χρειάζεται πρόσβαση στο δίκτυο.</p><a href="${scope}">Δοκίμασε ξανά</a></section></body></html>`;
+    mime='text/html; charset=utf-8';
+  }
+  res.writeHead(200, {'Content-Type':mime,'Cache-Control':cacheControl,'X-Content-Type-Options':'nosniff'});
+  res.end(req.method==='HEAD'?undefined:content);
+  return true;
+}
+
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
-const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js']);
+const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js']);
 async function serveStatic(req, res, url) {
   let requested = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
   if (!PUBLIC_FILES.has(requested)) return sendJson(res, 404, { error: 'Η σελίδα δεν βρέθηκε.' });
@@ -712,6 +811,7 @@ const server = http.createServer(async (req, res) => {
     await stateReady;
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
+    else if (await serveRoleApp(req,res,url)) { /* role-specific installable app */ }
     else if (req.method === 'GET' || req.method === 'HEAD') await serveStatic(req, res, url);
     else sendJson(res, 405, { error: 'Μη επιτρεπτή μέθοδος.' });
   } catch (error) {
