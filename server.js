@@ -171,6 +171,18 @@ async function initState() {
   }
 }
 
+function clearExpiredCourierApplications() {
+  if (!state || !Array.isArray(state.courierApplications)) return;
+  const remaining = pruneApplications(state.courierApplications);
+  if (remaining.length !== state.courierApplications.length) {
+    state.courierApplications = remaining;
+    persistState().catch(error => console.error('[FairDelivery] applicant retention cleanup failed:', error.message));
+  }
+}
+// An hourly purge runs even if no applicant or administrator opens the site.
+const courierRetentionTimer = setInterval(clearExpiredCourierApplications, 60 * 60 * 1000);
+courierRetentionTimer.unref();
+
 function persistState() {
   const snapshot = JSON.stringify(state, null, 2);
   writeQueue = writeQueue.then(async () => {
@@ -364,6 +376,7 @@ async function handleApi(req, res, url) {
 
   if (method === 'GET' && pathname === '/api/admin/courier-applications') {
     if (!requireRole(req, res, ['admin'])) return;
+    clearExpiredCourierApplications();
     return sendJson(res, 200, {
       applications: state.courierApplications.map(app => ({
         ...app, screening: evaluateApplication(app)
