@@ -74,6 +74,27 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   assert.ok(customerHtml.includes('id="categoryFilters"'));
   const scopedCommon = await (await fetch(base+'/assets/common.js')).text();
   assert.ok(scopedCommon.includes("'/app/shop/': 'shop'"), 'Role detection missing scoped shop PWA');
+  const courierPage=await fetch(base+'/courier-apply.html');
+  assert.equal(courierPage.status,200);
+  assert.match(await courierPage.text(),/Γίνε συνεργάτης|Οδήγησε με τους δικούς σου όρους/);
+  assert.equal((await fetch(base+'/courier-apply.js')).status,200);
+  const intakeConfig=await api('/api/courier-applications/config');
+  assert.equal(intakeConfig.open,true);
+  assert.equal(intakeConfig.automaticApproval,false);
+  const forbidden=await fetch(base+'/api/admin/courier-applications');
+  assert.equal(forbidden.status,401,'Applications must be admin-only');
+  const applicationSubmission=await api('/api/courier-applications',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      fullName:'Test Freelancer',email:'test@example.invalid',phone:'6900000099',region:'Πειραιάς',
+      vehicle:'motorcycle',licenseCategory:'B',licenseValid:false,insuranceUntil:'2020-01-01',
+      businessActive:false,canInvoice:false,equipmentReady:true,independentChoice:true,
+      privacyAcknowledged:true
+    })
+  });
+  assert.equal(applicationSubmission.received,true);
+  assert.equal(applicationSubmission.screening.status,'needs-information');
+  assert.equal(applicationSubmission.screening.requiresHumanVerification,true);
   await login('shop');
   assert.equal((await api('/api/config')).settings.customerServiceFee, 1.79);
   const created = await api('/api/shop/riders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Test Rider' }) });
@@ -114,7 +135,20 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   assert.equal(managed.order.deliveryManagedByShop, true);
   const finished = await api(`/api/orders/${shopDelivery.order.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'delivered' }) });
   assert.equal(finished.order.status, 'delivered');
-  await login('admin'); const stats = await api('/api/stats'); assert.equal(stats.ordersToday, 2); assert.equal(stats.deliveredToday, 2);
+  await login('admin');
+  const couriers=await api('/api/admin/courier-applications');
+  assert.equal(couriers.applications.length,1);
+  assert.equal(couriers.applications[0].fullName,'Test Freelancer');
+  assert.equal(couriers.applications[0].status,'new');
+  const candidateId=couriers.applications[0].id;
+  const reviewed=await api('/api/admin/courier-applications/'+candidateId,{
+    method:'PATCH',body:JSON.stringify({status:'needs-documents',reviewNotes:'Έλεγχος διπλώματος'})
+  });
+  assert.equal(reviewed.application.status,'needs-documents');
+  const erased=await api('/api/admin/courier-applications/'+candidateId,{method:'DELETE'});
+  assert.equal(erased.deleted,true);
+  assert.equal((await api('/api/admin/courier-applications')).applications.length,0);
+  const stats = await api('/api/stats'); assert.equal(stats.ordersToday, 2); assert.equal(stats.deliveredToday, 2);
   assert.equal(stats.platformFeeToday, 3.58);
   const shopCode = await api('/api/admin/shop-code', { method: 'POST' }); assert.ok(shopCode.accessCode);
   const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8')); assert.equal(saved.orders.length, 2); assert.ok(saved.riders[created.rider.id].codeHash); assert.ok(saved.shopCredential.codeHash);
