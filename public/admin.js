@@ -132,6 +132,28 @@ document.querySelectorAll('[data-local-report]').forEach(button=>button.onclick=
 $('clearAiChat').onclick=()=>{$('chatLog').replaceChildren();appendBubble('assistant','Τι θέλεις να δούμε;');FD.notice('aiMsg','');};
 
 function appendBubble(role,text,formatted=false){const node=document.createElement('div');node.className='bubble'+(role==='me'?' me':'');if(formatted){node.classList.add('ai-formatted');renderAiText(node,text);}else node.textContent=text;$('chatLog').appendChild(node);$('chatLog').scrollTop=$('chatLog').scrollHeight;}
+let migrationReady=false;
+$('migrationPreflight').onclick=async()=>{
+ const b=$('migrationPreflight');b.disabled=true;migrationReady=false;$('migrationCopy').disabled=true;FD.notice('migrationStatus','Έλεγχος παλιάς και νέας βάσης…');
+ try{
+  const data=await FD.api('/api/admin/migration/preflight');
+  migrationReady=data.copyAvailable;
+  $('migrationDigest').value=data.source.digest;
+  FD.notice('migrationStatus','Παλιά βάση: '+Object.entries(data.source.counts).map(([k,v])=>k+' '+v).join(' · ')+' · SHA-256: '+data.source.digest+' · Νέα βάση: '+data.destination.recordCount+' εγγραφές · Συντήρηση: '+(data.maintenance?'ενεργή':'ανενεργή')+'. '+(data.copyAvailable?'Η αντιγραφή μπορεί να γίνει μετά τον έλεγχο του τελικού backup.':'Απαιτείται συντήρηση και κενή βάση.'));
+  $('migrationCopy').disabled=!migrationReady;
+ }catch(e){FD.notice('migrationStatus',e.message,true);}
+ finally{b.disabled=false;}
+};
+$('migrationCopy').onclick=async()=>{
+ if(!migrationReady)return;
+ if(!confirm('Έχεις ελέγξει το τελικό backup και τη φράση του; Θα γίνει μόνο αντιγραφή στην κενή Neon, χωρίς αλλαγή της παλιάς βάσης.'))return;
+ const b=$('migrationCopy');b.disabled=true;
+ try{
+  const result=await FD.api('/api/admin/migration/copy',{method:'POST',body:JSON.stringify({adminCode:$('migrationAdminCode').value,expectedDigest:$('migrationDigest').value.trim(),confirmDownloadedBackup:$('migrationBackupConfirmed').checked,confirmNewDatabase:$('migrationDestinationConfirmed').checked})});
+  migrationReady=false;FD.notice('migrationStatus','Η αντιγραφή και επαλήθευση ολοκληρώθηκαν. SHA-256: '+result.integritySha256+'. Η εφαρμογή χρησιμοποιεί ακόμη την παλιά βάση μέχρι την ελεγχόμενη αλλαγή σύνδεσης.');
+ }catch(e){FD.notice('migrationStatus',e.message,true);}
+ finally{for(const id of ['migrationAdminCode'])$(id).value='';}
+};
 $('storageVerify').onclick=async()=>{
  const b=$('storageVerify');b.disabled=true;FD.notice('storageVerifyStatus','Γίνεται έλεγχος της αποθηκευμένης βάσης…');
  try{
