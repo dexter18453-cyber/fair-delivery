@@ -977,7 +977,7 @@ async function handleApi(req, res, url) {
       const result=await fairAssistant.askGroq(message);
       if(result.status==='private')return sendJson(res,400,{error:'Αφαίρεσε προσωπικά στοιχεία, αριθμούς λογαριασμών και μυστικά από την ερώτηση.'});
       if(result.status==='quota')return sendJson(res,429,{error:'Ο Groq έφτασε το διαθέσιμο όριο. Δεν γίνεται μετάβαση σε πληρωμένο πάροχο.'});
-      if(result.status==='ok')return sendJson(res,200,{answer:result.answer,mode:'ai',model:fairAssistant.MODEL});
+      if(result.status==='ok')return sendJson(res,200,{answer:result.answer,mode:'ai',model:fairAssistant.MODEL,truncated:result.truncated===true});
       return sendJson(res,502,{error:'Ο Groq δεν είναι διαθέσιμος. Δοκίμασε αργότερα ή χρησιμοποίησε τις τοπικές αναφορές.'});
     }catch(e){return sendJson(res,502,{error:'Δεν ήταν δυνατή η σύνδεση με τον Groq. Δοκίμασε αργότερα.'});}
   }
