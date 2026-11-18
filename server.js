@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const courierInterest=require('./courier-interest');
+const { storeId:validStoreId, allStores, getStore, publicStore, newStore }=require('./stores');
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
 const {paymentDetails,shopHold,initialPayout,visiblePayout}=require('./shop-controls');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
@@ -70,6 +71,8 @@ function normalizeState(parsed = {}) {
     orders: Array.isArray(parsed.orders) ? parsed.orders : [],
     riders: parsed.riders && typeof parsed.riders === 'object' ? parsed.riders : {},
     shopCredential: parsed.shopCredential || null,
+    stores: parsed.stores && typeof parsed.stores==='object' && !Array.isArray(parsed.stores)?parsed.stores:{},
+    defaultStoreName: parsed.defaultStoreName || 'Πρώτο κατάστημα',
     courierApplications: pruneApplications(parsed.courierApplications),
     customers: parsed.customers && typeof parsed.customers === 'object' && !Array.isArray(parsed.customers) ? parsed.customers : {},
     shopSettlements: Array.isArray(parsed.shopSettlements) ? parsed.shopSettlements : [],
@@ -84,7 +87,7 @@ function nowIso() { return new Date().toISOString(); }
 function publicOrder(order) {
   if (!order) return null;
   return {
-    id: order.id, items: order.items, subtotal: order.subtotal, serviceFee: order.serviceFee,
+    id: order.id, storeId: order.storeId||'default', storeName: getStore(state,order.storeId||'default')?.name||'Κατάστημα', items: order.items, subtotal: order.subtotal, serviceFee: order.serviceFee,
     deliveryFee: order.deliveryFee || 0,
     total: order.total, status: order.status, createdAt: order.createdAt, updatedAt: order.updatedAt,
     paymentMethod: order.paymentMethod || 'cash', paymentStatus: order.paymentStatus || 'pilot_not_charged', paymentMode: 'simulation', paymentCollected: false,
@@ -528,8 +531,16 @@ async function handleApi(req, res, url) {
     } else {
       const expected = roleCode(role);
       if (role === 'shop') {
+        storeId=validStoreId(body.storeId===undefined?'default':body.storeId);
+        if(!storeId||!getStore(state,storeId))return sendJson(res,401,{error:'Μη έγκυρα στοιχεία καταστήματος.'});
+        if(storeId!=='default'){
+          const store=getStore(state,storeId);
+          const supplied=await riderCodeHash(String(body.code||''),store.codeSalt);
+          if(!safeEqual(supplied,store.codeHash))return sendJson(res,401,{error:'Μη έγκυρα στοιχεία καταστήματος.'});
+        } else {
         if (!state.shopCredential && !expected) return sendJson(res, 503, { error: 'Δεν υπάρχει κωδικός καταστήματος. Ο διαχειριστής μπορεί να δημιουργήσει νέο από το Control Center.' });
         if (!(await shopCodeMatches(String(body.code || '')))) return sendJson(res, 401, { error: 'Λάθος κωδικός καταστήματος. Μπορείς να εκδώσεις νέο από το Control Center.' });
+        }
       } else {
         if (!expected) return sendJson(res, 503, { error: 'Δεν έχει οριστεί κωδικός διαχειριστή στον server.' });
         if (!safeEqual(String(body.code || ''), expected)) return sendJson(res, 401, { error: 'Λάθος κωδικός διαχειριστή.' });
@@ -561,29 +572,65 @@ async function handleApi(req, res, url) {
   if (method === 'GET' && pathname === '/api/auth/me') {
     const roleHint = String(req.headers['x-fd-role'] || '');
     const session = getSession(req, roleHint);
-    return sendJson(res, 200, { authenticated: Boolean(session), role: session?.role || null });
+    return sendJson(res, 200, { authenticated: Boolean(session), role: session?.role || null, storeId:session?.storeId||null });
+  }
+
+  if(method==='GET'&&pathname==='/api/stores'){
+    return sendJson(res,200,{stores:allStores(state).filter(s=>s.active).map(s=>publicStore(state,s))});
+  }
+  if(pathname==='/api/admin/stores'&&['GET','POST','PATCH'].includes(method)){
+    const session=requireRole(req,res,['admin']);if(!session)return;
+    if(method==='GET')return sendJson(res,200,{stores:allStores(state).map(s=>({...publicStore(state,s),active:s.active}))});
+    const body=await readJson(req,4096);
+    if(method==='POST'){
+      if(Object.keys(state.stores).length>=30)return sendJson(res,409,{error:'Το πιλοτικό υποστηρίζει έως 30 επιπλέον καταστήματα.'});
+      const accessCode=crypto.randomBytes(18).toString('base64url'),salt=crypto.randomBytes(16).toString('hex');
+      let store;try{store=newStore(body.name,salt,await riderCodeHash(accessCode,salt));}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
+      state.stores[store.id]=store;await persistState();
+      return sendJson(res,201,{store:publicStore(state,store),accessCode});
+    }
+    const id=validStoreId(body.storeId);const store=id&&getStore(state,id);
+    if(!store)return sendJson(res,404,{error:'Το κατάστημα δεν βρέθηκε.'});
+    if(typeof body.name==='string'){
+      const name=body.name.trim();if(name.length<2||name.length>100)return sendJson(res,400,{error:'Μη έγκυρο όνομα.'});
+      if(id==='default')state.defaultStoreName=name;else store.name=name;
+    }
+    if(typeof body.active==='boolean'&&id!=='default'){
+      if(body.active&&(!store.products.some(p=>p.active)||!store.settings.storeLocation))return sendJson(res,409,{error:'Πρόσθεσε ενεργό προϊόν και σημείο καταστήματος πριν την εμφάνιση στο πιλοτικό μενού.'});
+      store.active=body.active;
+    }
+    await persistState();return sendJson(res,200,{store:publicStore(state,getStore(state,id))});
   }
 
   if (method === 'GET' && pathname === '/api/config') {
-    return sendJson(res, 200, { settings: state.settings, storeLocation: state.settings.storeLocation || null, demoMode: DEMO_MODE, acceptingOrders: !state.shopHolds.default?.suspended });
+    const role=String(req.headers['x-fd-role']||'');
+    const session=role==='shop'?getSession(req,'shop'):null;
+    const id=session?.storeId||validStoreId(url.searchParams.get('storeId')||'default');
+    const store=id&&getStore(state,id);
+    if(!store||(!store.active&&!session))return sendJson(res,404,{error:'Το κατάστημα δεν είναι διαθέσιμο.'});
+    const settings={...state.settings,shopDeliveryFee:store.settings.shopDeliveryFee||0,storeLocation:store.settings.storeLocation||null};
+    return sendJson(res,200,{settings,storeLocation:settings.storeLocation,demoMode:DEMO_MODE,store:publicStore(state,store),acceptingOrders:publicStore(state,store).acceptingOrders});
   }
 
   if (method === 'GET' && pathname === '/api/products') {
-    return sendJson(res, 200, { products: state.products.filter(p => p.active) });
+    const id=validStoreId(url.searchParams.get('storeId')||'default');const store=id&&getStore(state,id);
+    if(!store||!store.active)return sendJson(res,404,{error:'Το κατάστημα δεν είναι διαθέσιμο.'});
+    return sendJson(res,200,{products:store.products.filter(p=>p.active)});
   }
 
   if (pathname === '/api/shop/products' && ['GET', 'POST'].includes(method)) {
     const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
-    if (method === 'GET') return sendJson(res, 200, { products: state.products });
+    const store=getStore(state,session.storeId||'default');
+    if (method === 'GET') return sendJson(res, 200, { products: store.products });
     const body = await readJson(req, 4096);
-    if (state.products.length >= 200) return sendJson(res, 409, { error: 'Το πιλοτικό δέχεται έως 200 προϊόντα.' });
+    if (store.products.length >= 200) return sendJson(res, 409, { error: 'Το πιλοτικό δέχεται έως 200 προϊόντα.' });
     const name = String(body.name || '').trim();
     const category = String(body.category || 'Μενού').trim();
     const description = String(body.description || '').trim();
     if (name.length < 2 || name.length > 100 || !category || category.length > 60 || description.length > 500) return sendJson(res, 400, { error: 'Έλεγξε όνομα, κατηγορία και περιγραφή προϊόντος.' });
     if (typeof body.price !== 'number') return sendJson(res, 400, { error: 'Δώσε έγκυρη τιμή προϊόντος.' });
     const product = { id: crypto.randomUUID(), name, category, description, price: validateMoney(body.price, 'Τιμή προϊόντος'), active: body.active !== false };
-    state.products.push(product);
+    store.products.push(product);
     await persistState();
     return sendJson(res, 201, { product });
   }
@@ -591,7 +638,7 @@ async function handleApi(req, res, url) {
   const productMutation = pathname.match(/^\/api\/shop\/products\/([a-zA-Z0-9-]+)$/);
   if (method === 'PATCH' && productMutation) {
     const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
-    const product = state.products.find(p => p.id === productMutation[1]);
+    const product = getStore(state,session.storeId||'default').products.find(p => p.id === productMutation[1]);
     if (!product) return sendJson(res, 404, { error: 'Το προϊόν δεν βρέθηκε.' });
     const body = await readJson(req, 4096);
     const updated = { ...product };
@@ -618,8 +665,11 @@ async function handleApi(req, res, url) {
     const ip = clientIp(req);
     if (!rateLimit(requestWindows, `orders:${ip}`, 10, 60_000)) return sendJson(res, 429, { error: 'Πολλές δοκιμαστικές παραγγελίες. Περίμενε ένα λεπτό.' });
     const body = await readJson(req, 12 * 1024);
+    const id=validStoreId(body.storeId===undefined?'default':body.storeId);const store=id&&getStore(state,id);
+    if(!store||!store.active)return sendJson(res,404,{error:'Το κατάστημα δεν είναι διαθέσιμο.'});
     const customerSession = getSession(req, 'customer');
     const customerAccount = customerSession ? state.customers[customerSession.userId] : null;
+    if(store.id!=='default'&&!customerAccount)return sendJson(res,401,{error:'Συνδέσου στον δοκιμαστικό λογαριασμό σου.'});
     let payment;
     try { payment = checkoutPayment(body, customerAccount); } catch (error) { return sendJson(res, error.statusCode || 400, {error:error.message}); }
     if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 30) return sendJson(res, 400, { error: 'Το καλάθι δεν είναι έγκυρο.' });
@@ -641,25 +691,25 @@ async function handleApi(req, res, url) {
     const lines = [];
     for (const row of body.items) {
       if (!row || typeof row !== 'object') return sendJson(res, 400, { error: 'Μη έγκυρο προϊόν ή ποσότητα.' });
-      const product = state.products.find(p => p.id === String(row.productId) && p.active);
+      const product = store.products.find(p => p.id === String(row.productId) && p.active);
       const qty = Number(row.qty);
       if (!product || !Number.isInteger(qty) || qty < 1 || qty > 20) return sendJson(res, 400, { error: 'Μη έγκυρο προϊόν ή ποσότητα.' });
       lines.push({ productId: product.id, name: product.name, unitPrice: product.price, qty, lineTotal: round2(product.price * qty) });
     }
     const subtotal = round2(lines.reduce((sum, line) => sum + line.lineTotal, 0));
     const order = {
-      id: crypto.randomUUID(), storeId: 'default', items: lines, subtotal,
+      id: crypto.randomUUID(), storeId: store.id, items: lines, subtotal,
       ...payment, customerId: customerAccount?.id || null, trackingPrivate: Boolean(customerAccount),
       customerName, customerPhone, deliveryAddress,
       deliveryLocation: { lat: deliveryLat, lng: deliveryLng },
-      serviceFee: 0, deliveryFee: round2(state.settings.shopDeliveryFee),
-      total: round2(subtotal + state.settings.shopDeliveryFee),
+      serviceFee: 0, deliveryFee: round2(store.settings.shopDeliveryFee||0),
+      total: round2(subtotal + (store.settings.shopDeliveryFee||0)),
       billingModel: 'shop-fixed-v1', shopFeeCents: FEE_CENTS, completedAt: null,
       status: 'new', createdAt: nowIso(), updatedAt: nowIso(),
       estimatedKm: null, badWeather: false, riderPayEstimate: null,
       assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
     };
-    if(state.shopHolds.default?.suspended) return sendJson(res,409,{error:'Το κατάστημα δεν δέχεται προσωρινά νέες παραγγελίες.'});
+    if(!store.active||state.shopHolds[store.id]?.suspended) return sendJson(res,409,{error:'Το κατάστημα δεν δέχεται προσωρινά νέες παραγγελίες.'});
     state.orders.push(order); await persistState();
     return sendJson(res, 201, { order: publicOrder(order), trackingUrl: `/app/customer/?order=${encodeURIComponent(order.id)}` });
   }
@@ -708,7 +758,7 @@ async function handleApi(req, res, url) {
       if (!shopManagedDelivery) {
         const riderId = String(body.riderId || '');
         const rider = state.riders[riderId];
-        if (!rider || rider.active === false || rider.storeId !== (session.storeId || 'default')) return sendJson(res, 400, { error: 'Επίλεξε ενεργό διανομέα του καταστήματος.' });
+        if (!rider || rider.active === false || (rider.storeId||'default') !== (order.storeId||'default')) return sendJson(res, 400, { error: 'Επίλεξε ενεργό διανομέα του καταστήματος.' });
         assignedRider = rider;
       }
     }
@@ -735,7 +785,8 @@ async function handleApi(req, res, url) {
 
   if(method==='GET' && pathname==='/api/shop/billing'){
     const session=requireRole(req,res,['shop','admin']);if(!session)return;
-    const storeId=session.storeId||'default';
+    const storeId=session.role==='admin'?validStoreId(url.searchParams.get('storeId')||'default'):session.storeId||'default';
+    if(!storeId||!getStore(state,storeId))return sendJson(res,404,{error:'Το κατάστημα δεν βρέθηκε.'});
     return sendJson(res,200,{...settlementSummary(state.orders,state.shopSettlements,storeId),payout:visiblePayout(state.shopPayout,session.role),hold:state.shopHolds[storeId]||{suspended:false},holdHistory:state.shopHoldHistory.filter(x=>x.storeId===storeId).slice(-30)});
   }
   if(method==='PATCH' && ['/api/admin/shop-payout','/api/admin/shop-hold'].includes(pathname)){
@@ -745,7 +796,7 @@ async function handleApi(req, res, url) {
     if(!rateLimit(authWindows,'shop-controls:'+clientIp(req),15,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες.'});
     const body=await readJson(req,4096);
     if(!roleCode('admin')||!safeEqual(String(body.adminCode||''),roleCode('admin')))return sendJson(res,403,{error:'Απαιτείται επιβεβαίωση με τον κωδικό Admin.'});
-    const storeId=session.storeId||'default';
+    const storeId=validStoreId(body.storeId||'default');if(!storeId||!getStore(state,storeId))return sendJson(res,404,{error:'Το κατάστημα δεν βρέθηκε.'});
     if(pathname.endsWith('shop-payout')){
       let payout;
       try{payout=paymentDetails(body);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
@@ -763,19 +814,20 @@ async function handleApi(req, res, url) {
     const session=requireRole(req,res,['admin']);if(!session)return;
     const body=await readJson(req,1024);
     if(body.confirmPilot!==true)return sendJson(res,400,{error:'Απαιτείται επιβεβαίωση ότι η καταχώριση είναι αποκλειστικά δοκιμαστική.'});
+    const storeId=validStoreId(body.storeId||'default');if(!storeId||!getStore(state,storeId))return sendJson(res,404,{error:'Το κατάστημα δεν βρέθηκε.'});
     let entry;
-    try{entry=recordSettlement(state.orders,state.shopSettlements,session.storeId||'default',body.day,body.expectedCents);}
+    try{entry=recordSettlement(state.orders,state.shopSettlements,storeId,body.day,body.expectedCents);}
     catch(error){return sendJson(res,error.statusCode||400,{error:error.message});}
     state.shopSettlements.push(entry);
     try{await persistState();}catch(error){state.shopSettlements=state.shopSettlements.filter(x=>x.id!==entry.id);throw error;}
-    return sendJson(res,201,{settlement:entry,...settlementSummary(state.orders,state.shopSettlements,session.storeId||'default')});
+    return sendJson(res,201,{settlement:entry,...settlementSummary(state.orders,state.shopSettlements,storeId)});
   }
 
   if (method === 'GET' && pathname === '/api/stats') {
     const session = requireRole(req, res, ['admin']); if (!session) return;
     const today = athensDay();
     const todayOrders = state.orders.filter(o => athensDay(o.createdAt)===today);
-    const billing=settlementSummary(state.orders,state.shopSettlements,'default',today);
+    const platformFeeToday=allStores(state).reduce((sum,store)=>sum+(settlementSummary(state.orders,state.shopSettlements,store.id,today).days.find(d=>d.day===today)?.feeCents||0),0)/100;
     return sendJson(res, 200, {
       activeOrders: state.orders.filter(o => !['delivered', 'cancelled'].includes(o.status)).length,
       ordersToday: todayOrders.length,
@@ -783,7 +835,7 @@ async function handleApi(req, res, url) {
       grossValueToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal, 0)),
       shopsCommissionToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal * state.settings.shopCommissionPercent / 100, 0)),
       riderCountOnline: Object.values(state.riders).filter(r => r.online).length,
-      platformFeeToday: (billing.days.find(d=>d.day===today)?.feeCents||0)/100
+      platformFeeToday
     });
   }
 
@@ -809,9 +861,14 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && pathname === '/api/admin/shop-code') {
     const session = requireRole(req, res, ['admin']); if (!session) return;
+    const body=await readJson(req,1024);
+    const storeId=validStoreId(body.storeId||'default'),store=storeId&&getStore(state,storeId);
+    if(!store)return sendJson(res,404,{error:'Το κατάστημα δεν βρέθηκε.'});
     const accessCode = crypto.randomBytes(18).toString('base64url');
     const codeSalt = crypto.randomBytes(16).toString('hex');
-    state.shopCredential = { codeSalt, codeHash: await riderCodeHash(accessCode, codeSalt), updatedAt: nowIso() };
+    const credential={codeSalt,codeHash:await riderCodeHash(accessCode,codeSalt),updatedAt:nowIso()};
+    if(storeId==='default')state.shopCredential=credential;else Object.assign(store,credential);
+    for(const [token,old] of sessions)if(old.role==='shop'&&old.storeId===storeId)sessions.delete(token);
     await persistState();
     return sendJson(res, 200, { accessCode, warning: postgresPool ? null : 'Προσοχή: χωρίς μόνιμη βάση ο κωδικός χάνεται σε νέο deployment.' });
   }
@@ -856,18 +913,20 @@ async function handleApi(req, res, url) {
     const body = await readJson(req, 4096);
     const lat = Number(body.lat); const lng = Number(body.lng);
     if (!validPoint(body)) return sendJson(res, 400, { error: 'Μη έγκυρες συντεταγμένες καταστήματος.' });
-    state.settings.storeLocation = { lat, lng, updatedAt: nowIso() };
+    const settings=getStore(state,session.storeId||'default').settings;
+    settings.storeLocation = { lat, lng, updatedAt: nowIso() };
     await persistState();
-    return sendJson(res, 200, { storeLocation: state.settings.storeLocation });
+    return sendJson(res, 200, { storeLocation: settings.storeLocation });
   }
 
   if (method === 'POST' && pathname === '/api/shop/delivery-fee') {
     const session = requireRole(req, res, ['shop', 'admin']); if (!session) return;
     const body = await readJson(req, 4096);
     if (typeof body.deliveryFee !== 'number') return sendJson(res, 400, { error: 'Δώσε το κόστος διανομής σε ευρώ.' });
-    state.settings.shopDeliveryFee = validateMoney(body.deliveryFee, 'Κόστος διανομής', 50);
+    const settings=getStore(state,session.storeId||'default').settings;
+    settings.shopDeliveryFee = validateMoney(body.deliveryFee, 'Κόστος διανομής', 50);
     await persistState();
-    return sendJson(res, 200, { deliveryFee: state.settings.shopDeliveryFee });
+    return sendJson(res, 200, { deliveryFee: settings.shopDeliveryFee });
   }
 
   if (method === 'GET' && pathname === '/api/rider/profile') {

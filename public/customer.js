@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let products = []; let cart = new Map(); let currentOrderId = null; let trackingTimer = null;
-let serviceFee = 0; let deliveryFee = 0; let submitting = false; let acceptingOrders=true;
+let serviceFee = 0; let deliveryFee = 0; let submitting = false; let acceptingOrders=true; let selectedStore='default'; let storeLoading=false;
 let deliveryMap = null; let deliveryMarker = null; let trackingMap = null; let trackingLayers = [];
 const DEFAULT_CENTER = [37.97, 23.67];
 function renderCart() {
@@ -14,7 +14,7 @@ function renderCart() {
   $('serviceFee').textContent = FD.money(rows.length ? serviceFee : 0);
   $('deliveryFee').textContent = FD.money(rows.length ? deliveryFee : 0);
   $('total').textContent = FD.money(rows.length ? subtotal + serviceFee + deliveryFee : 0);
-  $('placeOrder').disabled = submitting || !rows.length || !acceptingOrders;
+  $('placeOrder').disabled = submitting || storeLoading || !rows.length || !acceptingOrders;
   document.querySelectorAll('[data-plus]').forEach(b => b.onclick = () => changeQty(b.dataset.plus, 1));
   document.querySelectorAll('[data-minus]').forEach(b => b.onclick = () => changeQty(b.dataset.minus, -1));
 }
@@ -50,9 +50,11 @@ function renderFilteredProducts() {
   document.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>changeQty(b.dataset.add,1));
 }
 async function loadProducts() {
-  const [menu, config] = await Promise.all([FD.api('/api/products'), FD.api('/api/config')]); products = menu.products;
+  const suffix=selectedStore==='default'?'':'?storeId='+encodeURIComponent(selectedStore);
+  const [menu, config] = await Promise.all([FD.api('/api/products'+suffix), FD.api('/api/config'+suffix)]); products = menu.products;
+  $('cartStoreName').textContent=config.store?.name||'Πρώτο κατάστημα';
   acceptingOrders=config.acceptingOrders!==false;
-  if(!acceptingOrders)FD.notice('shopUnavailable','Το κατάστημα δεν δέχεται προσωρινά νέες παραγγελίες.',true);
+  FD.notice('shopUnavailable',acceptingOrders?'':'Το κατάστημα δεν δέχεται προσωρινά νέες παραγγελίες.',!acceptingOrders);
   serviceFee = Number(config.settings.customerServiceFee);
   deliveryFee = Number(config.settings.shopDeliveryFee || 0);
   const categories=['Όλα',...new Set(products.map(p=>p.category||'Μενού'))];
@@ -69,7 +71,7 @@ async function loadProducts() {
   $('feeNote').textContent = `Χωρίς χρέωση Fair Delivery στον πελάτη. Διανομή καταστήματος: ${FD.money(deliveryFee)}. Πληρωμή απευθείας στο κατάστημα στην πραγματική λειτουργία.`;
 }
 $('placeOrder').addEventListener('click', async () => {
-  if (submitting) return;
+  if (submitting || storeLoading || !acceptingOrders) return;
   try {
     const lat = Number($('deliveryCoords').dataset.lat); const lng = Number($('deliveryCoords').dataset.lng);
     if (!$('customerName').value.trim() || !$('customerPhone').value.trim() || !$('deliveryAddress').value.trim() || !Number.isFinite(lat) || !Number.isFinite(lng)) {
@@ -81,11 +83,23 @@ $('placeOrder').addEventListener('click', async () => {
     if (paymentMethod && !$('confirmSimulation').checked) { FD.notice('notice','Επιβεβαίωσε ότι η πληρωμή είναι δοκιμαστική.',true); return; }
     submitting = true; renderCart();
     const items = [...cart].map(([productId, qty]) => ({ productId, qty }));
-    const result = await FD.api('/api/orders', { method: 'POST', body: JSON.stringify({ items, customerName: $('customerName').value.trim(), customerPhone: $('customerPhone').value.trim(), deliveryAddress: $('deliveryAddress').value.trim(), deliveryLocation: { lat, lng }, privacyConsent: true, ...(paymentMethod ? {paymentMethod, confirmPaymentSimulation: true} : {}) }) });
+    const result = await FD.api('/api/orders', { method: 'POST', body: JSON.stringify({ storeId:selectedStore, items, customerName: $('customerName').value.trim(), customerPhone: $('customerPhone').value.trim(), deliveryAddress: $('deliveryAddress').value.trim(), deliveryLocation: { lat, lng }, privacyConsent: true, ...(paymentMethod ? {paymentMethod, confirmPaymentSimulation: true} : {}) }) });
     cart.clear(); renderCart(); FD.notice('notice', 'Η πιλοτική παραγγελία καταχωρίστηκε. Δεν έγινε χρέωση.'); window.FDAccount?.refreshOrders().catch(()=>{}); showTracking(result.order.id);
   } catch (e) { FD.notice('notice', e.message, true); }
   finally { submitting = false; renderCart(); }
 });
+async function loadStores(){
+  const select=$('storeSelect');
+  const data=await FD.api('/api/stores');
+  select.innerHTML=data.stores.map(s=>`<option value="${FD.esc(s.id)}">${FD.esc(s.name)}${s.acceptingOrders?'':' — προσωρινά κλειστό'}</option>`).join('');
+  select.value=selectedStore;
+  select.onchange=async()=>{
+    if(submitting||storeLoading){select.value=selectedStore;return;}
+    if(cart.size&&!confirm('Η αλλαγή καταστήματος θα αδειάσει το καλάθι. Συνέχεια;')){select.value=selectedStore;return;}
+    selectedStore=select.value;cart.clear();products=[];selectedCategory='Όλα';storeLoading=true;acceptingOrders=false;select.disabled=true;renderCart();renderFilteredProducts();
+    try{await loadProducts();}catch(e){FD.notice('shopUnavailable',e.message,true);}finally{storeLoading=false;select.disabled=false;renderCart();}
+  };
+}
 $('clearCart').addEventListener('click', () => { cart.clear(); renderCart(); FD.notice('notice', 'Το καλάθι καθαρίστηκε.'); });
 $('useLocation').onclick = () => {
   if (!navigator.geolocation) { $('locationNote').textContent = 'Ο browser δεν υποστηρίζει γεωεντοπισμό.'; return; }
@@ -115,4 +129,4 @@ async function refreshTracking() {
     if (['delivered', 'cancelled'].includes(o.status) && trackingTimer) { clearInterval(trackingTimer); trackingTimer = null; }
   } catch (e) { $('trackingInfo').textContent = e.message; }
 }
-(async () => { initDeliveryMap(); await loadProducts(); renderCart(); const id = new URLSearchParams(location.search).get('order'); if (id) showTracking(id); })().catch(e => FD.notice('notice', e.message, true));
+(async () => { initDeliveryMap(); await loadStores().catch(()=>{}); await loadProducts(); renderCart(); const id = new URLSearchParams(location.search).get('order'); if (id) showTracking(id); })().catch(e => FD.notice('notice', e.message, true));
