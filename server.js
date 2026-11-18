@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const courierInterest=require('./courier-interest');
+const fairAssistant=require('./fair-assistant');
 const { storeId:validStoreId, allStores, getStore, publicStore, newStore }=require('./stores');
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
 const {paymentDetails,shopHold,initialPayout,visiblePayout}=require('./shop-controls');
@@ -333,7 +334,7 @@ function offlineHelp(question) {
     return 'Η δοκιμαστική παραγγελία πηγαίνει από τον πελάτη στο κατάστημα: νέα → αποδοχή → ετοιμασία → ανάθεση στον διανομέα του καταστήματος → παραλαβή → παράδοση. Σε ακύρωση απαιτείται καταγραφή της αιτίας και, πριν από πραγματικές πληρωμές, ξεκάθαρη πολιτική επιστροφών.';
   }
   if (/ai|τεχνητ|openai|api/.test(q)) {
-    return 'Ο πραγματικός AI βοηθός ενεργοποιείται μόνο με OPENAI_API_KEY και OPENAI_MODEL στο Render. Η συνδρομή ChatGPT δεν αρκεί για το API και υπάρχει ξεχωριστή χρέωση. Μέχρι τότε λειτουργώ ως περιορισμένος οδηγός της εφαρμογής, χωρίς δημιουργία απαντήσεων από μοντέλο AI.';
+    return 'Ο βοηθός Groq υποστηρίζει το GPT-OSS 120B μέσω ξεχωριστού λογαριασμού Free plan. Χρειάζεται ιδιωτικό GROQ_API_KEY στο Render και επιβεβαίωση δωρεάν πλάνου. Οι τοπικές αναφορές λειτουργούν χωρίς εξωτερικό AI.';
   }
   return 'Αυτή τη στιγμή λειτουργώ ως βασικός οδηγός, όχι ως μοντέλο AI. Μπορώ να εξηγήσω: (1) σύνδεση καταστήματος και διανομέων, (2) ροή παραγγελίας, (3) χρεώσεις και φόρους, (4) σύνδεση OpenAI. Για ελεύθερες ερωτήσεις χρειάζεται ενεργή σύνδεση API.';
 }
@@ -343,7 +344,7 @@ async function handleApi(req, res, url) {
   const method = req.method;
 
   if (method === 'GET' && pathname === '/api/health') {
-    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.3.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: Boolean(process.env.OPENAI_API_KEY && process.env.OPENAI_MODEL), storage: postgresPool ? 'postgres' : 'temporary-file' });
+    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.3.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: fairAssistant.configured(), aiModel: fairAssistant.configured()?fairAssistant.MODEL:null, storage: postgresPool ? 'postgres' : 'temporary-file' });
   }
 
 
@@ -957,34 +958,28 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true });
   }
 
-  if (method === 'POST' && pathname === '/api/assistant') {
-    const session = requireRole(req, res, ['admin']); if (!session) return;
-    if (!rateLimit(aiWindows, session.userId, Number(process.env.AI_MAX_REQUESTS_PER_10_MIN || 10), 10 * 60 * 1000)) return sendJson(res, 429, { error: 'Έφτασες το όριο ερωτήσεων. Δοκίμασε ξανά σε λίγο.' });
-    const body = await readJson(req, 12 * 1024);
-    const message = typeof body.message === 'string' ? body.message.trim() : '';
-    if (!message || message.length > 2000) return sendJson(res, 400, { error: 'Γράψε ερώτηση έως 2.000 χαρακτήρες.' });
-    if (!process.env.OPENAI_API_KEY || !process.env.OPENAI_MODEL) return sendJson(res, 200, { answer: offlineHelp(message), mode: 'guide' });
-    const history = Array.isArray(body.history) ? body.history.slice(-8).map(m => ({ role: m?.role === 'assistant' ? 'assistant' : 'user', content: String(m?.content || '').slice(0, 1000) })).filter(m => m.content) : [];
-    const instructions = [
-      'Είσαι ο τεχνικός βοηθός του ανεξάρτητου project Fair Delivery. Απαντάς στα ελληνικά, με πρακτικά μικρά βήματα.',
-      'Το project είναι σε πιλοτικό στάδιο. Ξεχώριζε δοκιμαστικά δεδομένα από πραγματικά δεδομένα. Μην παρουσιάζεις τις ενδεικτικές χρεώσεις ως επίσημους κανόνες άλλης πλατφόρμας.',
-      'Αρχιτεκτονική: Node.js built-in HTTP server, JSON persistence σε DATA_DIR/state.json, σελίδες public/index.html (admin), customer-app.html, shop-app.html, Rider-App.html, κοινά assets/app.css και assets/common.js. Ροή παραγγελίας: new → accepted → ready → assigned → picked_up → delivered. Ρόλοι: shop, rider, admin. API: /api/orders, /api/products, /api/stats, /api/settings, /api/rider/status, /api/rider/location, /api/assistant.',
-      'Το JSON store είναι για ένα instance/πιλοτικό περιβάλλον, όχι για οριζόντια κλιμάκωση. Για πραγματική παραγωγή πρότεινε PostgreSQL, managed backups, πραγματική ταυτοποίηση χρηστών, tenant isolation ανά κατάστημα, payment provider και security/privacy review.',
-      'Μην βοηθάς σε αντιγραφή ιδιόκτητου κώδικα, ιδιωτικά endpoints, παράκαμψη ελέγχων, αυτοματοποιημένη αποδοχή παραγγελιών τρίτης εφαρμογής ή αλλοίωση πληρωμών. Πρότεινε δική μας υλοποίηση και εξουσιοδοτημένες διασυνδέσεις.',
-      'Μη ζητάς κωδικούς, API keys, ονόματα/τηλέφωνα πελατών ή ακριβείς διευθύνσεις.'
-    ].join('\n');
-    try {
-      const apiResponse = await fetch('https://api.openai.com/v1/responses', {
-        method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: process.env.OPENAI_MODEL, instructions, input: [...history, { role: 'user', content: message }], max_output_tokens: 700 })
-      });
-      const result = await apiResponse.json().catch(() => ({}));
-      if (!apiResponse.ok) return sendJson(res, 502, { error: result?.error?.message || `AI provider HTTP ${apiResponse.status}` });
-      const answer = result.output_text || (result.output || []).flatMap(item => item.content || []).filter(c => c.type === 'output_text').map(c => c.text).join('\n').trim();
-      return answer ? sendJson(res, 200, { answer, mode: 'ai' }) : sendJson(res, 502, { error: 'Ο AI πάροχος δεν επέστρεψε απάντηση.' });
-    } catch (error) {
-      return sendJson(res, 502, { error: 'Δεν ήταν δυνατή η σύνδεση με τον AI πάροχο.' });
+  if(method==='POST'&&pathname==='/api/assistant'){
+    const session=requireRole(req,res,['admin']);if(!session)return;
+    const origin=req.headers.origin;
+    if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    const body=await readJson(req,12*1024);
+    if(body.report){
+      const answer=fairAssistant.localReport(state,body.report);
+      return answer?sendJson(res,200,{answer,mode:'local-report'}):sendJson(res,400,{error:'Άγνωστη αναφορά.'});
     }
+    const message=typeof body.message==='string'?body.message.trim():'';
+    if(!message||message.length>2000)return sendJson(res,400,{error:'Γράψε ερώτηση έως 2.000 χαρακτήρες.'});
+    if(body.externalConfirmed!==true)return sendJson(res,200,{answer:offlineHelp(message),mode:'guide'});
+    if(!fairAssistant.configured())return sendJson(res,503,{error:'Ο Groq AI δεν έχει συνδεθεί ακόμα. Χρειάζεται κλειδί δωρεάν λογαριασμού και επιβεβαίωση του Free plan.'});
+    if(!rateLimit(aiWindows,'groq-global',10,10*60*1000))return sendJson(res,429,{error:'Όριο 10 AI ερωτήσεων ανά 10 λεπτά. Δοκίμασε αργότερα.'});
+    if(!rateLimit(aiWindows,'groq-day',100,24*60*60*1000))return sendJson(res,429,{error:'Ημερήσιο όριο AI. Οι τοπικές αναφορές παραμένουν διαθέσιμες.'});
+    try{
+      const result=await fairAssistant.askGroq(message);
+      if(result.status==='private')return sendJson(res,400,{error:'Αφαίρεσε προσωπικά στοιχεία, αριθμούς λογαριασμών και μυστικά από την ερώτηση.'});
+      if(result.status==='quota')return sendJson(res,429,{error:'Ο Groq έφτασε το διαθέσιμο όριο. Δεν γίνεται μετάβαση σε πληρωμένο πάροχο.'});
+      if(result.status==='ok')return sendJson(res,200,{answer:result.answer,mode:'ai',model:fairAssistant.MODEL});
+      return sendJson(res,502,{error:'Ο Groq δεν είναι διαθέσιμος. Δοκίμασε αργότερα ή χρησιμοποίησε τις τοπικές αναφορές.'});
+    }catch(e){return sendJson(res,502,{error:'Δεν ήταν δυνατή η σύνδεση με τον Groq. Δοκίμασε αργότερα.'});}
   }
 
   return sendJson(res, 404, { error: 'API endpoint δεν βρέθηκε.' });
