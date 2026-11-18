@@ -39,6 +39,7 @@ function initialPayout(saved,env=process.env){
  const payout=paymentDetails({iban:env.FD_PAYOUT_IBAN,beneficiary:env.FD_PAYOUT_BENEFICIARY});
  const pending=String(env.FD_PAYOUT_PENDING_IRIS||'').replace(/[\s()-]/g,'');
  if(pending && !/^(?:\+30)?69\d{8}$/.test(pending))error('Μη έγκυρη μορφή εκκρεμούς IRIS.');
+ if(env===process.env)console.info('[FairDelivery] Private payout configuration initialized; pending IRIS requires admin confirmation.');
  return {...payout,pendingIrisPhone:pending};
 }
 // Never expose unverified IRIS even to authenticated shops.
