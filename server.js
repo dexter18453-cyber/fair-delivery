@@ -15,6 +15,8 @@ const verifiedCustomers=require('./verified-customers');
 const emailOperations=new Set();
 const encryptedBackup=require('./encrypted-backup');
 const migrationTools=require('./migration-tools');
+const migrationTarget=require('./migration-target');
+let migrationCopyBusy=false;
 const credentialChanges=new Set();
 let backupBusy=false;
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
@@ -360,7 +362,7 @@ async function handleApi(req, res, url) {
   const maintenance=process.env.FD_MAINTENANCE_MODE==='true';
   // Manual freeze for a final consistent export. No order/account/shop writes
   // while this mode is enabled, including legacy guest APIs.
-  if(maintenance&&!['GET','HEAD'].includes(method)&&!(method==='POST'&&['/api/auth/login','/api/admin/backup'].includes(pathname))){
+  if(maintenance&&!['GET','HEAD'].includes(method)&&!(method==='POST'&&['/api/auth/login','/api/admin/backup','/api/admin/migration/copy'].includes(pathname))){
     return sendJson(res,503,{error:'Το Fair Delivery βρίσκεται σε προγραμματισμένη συντήρηση. Οι νέες καταχωρίσεις είναι προσωρινά απενεργοποιημένες.'},{'Retry-After':'600'});
   }
 
@@ -960,6 +962,57 @@ async function handleApi(req, res, url) {
     state.shopSettlements.push(entry);
     try{await persistState();}catch(error){state.shopSettlements=state.shopSettlements.filter(x=>x.id!==entry.id);throw error;}
     return sendJson(res,201,{settlement:entry,...settlementSummary(state.orders,state.shopSettlements,storeId)});
+  }
+
+  if(method==='GET'&&pathname==='/api/admin/migration/preflight'){
+    const admin=requireRole(req,res,['admin']);if(!admin)return;
+    if(!rateLimit(requestWindows,'migration-preview:'+clientIp(req),5,5*60*1000))return sendJson(res,429,{error:'Πολλοί έλεγχοι σε μικρό χρονικό διάστημα.'});
+    if(!process.env.FD_MIGRATION_TARGET_DATABASE_URL)return sendJson(res,503,{error:'Η νέα βάση δεν έχει συνδεθεί στο Render.'});
+    if(!postgresPool)return sendJson(res,503,{error:'Δεν υπάρχει μόνιμη τρέχουσα βάση.'});
+    const source=process.env.DATABASE_URL,target=process.env.FD_MIGRATION_TARGET_DATABASE_URL;
+    try{
+      const sourceUrl=new URL(source),targetUrl=new URL(migrationTarget.targetConnection(target));
+      if(sourceUrl.hostname===targetUrl.hostname&&sourceUrl.pathname===targetUrl.pathname)return sendJson(res,409,{error:'Η νέα βάση είναι ήδη η τρέχουσα.'});
+      await writeQueue;
+      const old=(await postgresPool.query('SELECT body FROM fair_delivery_state WHERE id=1')).rows[0]?.body;
+      if(!old)return sendJson(res,503,{error:'Δεν υπάρχει μητρώο στην τρέχουσα βάση.'});
+      const integrity=migrationTools.validateSnapshot(old);
+      const destination=migrationTarget.targetPool(target);
+      try{
+        const status=await migrationTarget.destinationState(destination);
+        return sendJson(res,200,{source:{digest:integrity.digest,counts:integrity.counts},destination:{empty:status.recordCount===0,recordCount:status.recordCount},maintenance:process.env.FD_MAINTENANCE_MODE==='true',copyAvailable:process.env.FD_MAINTENANCE_MODE==='true'&&status.recordCount===0});
+      }finally{await destination.end();}
+    }catch{return sendJson(res,503,{error:'Ο έλεγχος σύνδεσης ή ακεραιότητας απέτυχε.'});}
+  }
+  if(method==='POST'&&pathname==='/api/admin/migration/copy'){
+    const admin=requireRole(req,res,['admin']);if(!admin)return;
+    const origin=req.headers.origin;
+    if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    if(process.env.FD_MAINTENANCE_MODE!=='true')return sendJson(res,409,{error:'Η εγγραφή στη νέα βάση επιτρέπεται μόνο όταν έχουν κλείσει οι καταχωρίσεις.'});
+    if(!postgresPool||!process.env.FD_MIGRATION_TARGET_DATABASE_URL)return sendJson(res,503,{error:'Δεν έχουν συνδεθεί η αρχική και η νέα βάση.'});
+    if(migrationCopyBusy)return sendJson(res,409,{error:'Εκκρεμεί άλλη μεταφορά.'});
+    if(!rateLimit(authWindows,'migration-copy:'+clientIp(req),3,15*60*1000))return sendJson(res,429,{error:'Πολλές προσπάθειες μεταφοράς.'});
+    const body=await readJson(req,4096);
+    if(!safeEqual(String(body.adminCode||''),roleCode('admin')))return sendJson(res,403,{error:'Απαιτείται επαλήθευση κωδικού Admin.'});
+    if(body.confirmDownloadedBackup!==true||body.confirmNewDatabase!==true||typeof body.expectedDigest!=='string'||!/^[a-f0-9]{64}$/.test(body.expectedDigest))return sendJson(res,400,{error:'Χρειάζεται επαληθευμένο κρυπτογραφημένο αντίγραφο και ακριβές SHA-256.'});
+    try{
+      const sourceUrl=new URL(process.env.DATABASE_URL),targetUrl=new URL(migrationTarget.targetConnection(process.env.FD_MIGRATION_TARGET_DATABASE_URL));
+      if(sourceUrl.hostname===targetUrl.hostname&&sourceUrl.pathname===targetUrl.pathname)return sendJson(res,409,{error:'Δεν επιτρέπεται αντιγραφή προς την ίδια βάση.'});
+    }catch{return sendJson(res,503,{error:'Δεν είναι ασφαλής ο προορισμός.'});}
+    migrationCopyBusy=true;
+    try{
+      await writeQueue;
+      const old=(await postgresPool.query('SELECT body FROM fair_delivery_state WHERE id=1')).rows[0]?.body;
+      if(!old)return sendJson(res,503,{error:'Δεν βρέθηκε η αρχική βάση.'});
+      const integrity=migrationTools.validateSnapshot(old);
+      if(integrity.digest!==body.expectedDigest)return sendJson(res,409,{error:'Το αποθηκευμένο μητρώο διαφέρει από το αντίγραφο. Πάρε και έλεγξε νέο backup.'});
+      const destination=migrationTarget.targetPool(process.env.FD_MIGRATION_TARGET_DATABASE_URL);
+      try{
+        const copied=await migrationTarget.copyIntoNewDatabase(destination,old);
+        return sendJson(res,200,{copied:true,sourceUnchanged:true,cutoverDone:false,integritySha256:copied.digest,counts:copied.counts});
+      }finally{await destination.end();}
+    }catch{return sendJson(res,503,{error:'Η αντιγραφή δεν ολοκληρώθηκε ή δεν επιβεβαιώθηκε. Η αρχική βάση δεν άλλαξε.'});}
+    finally{migrationCopyBusy=false;}
   }
 
   if(method==='GET'&&pathname==='/api/admin/storage/verify'){
