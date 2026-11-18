@@ -4,7 +4,7 @@ const FD = {
   async api(url, options = {}) {
     const response = await fetch(url, { credentials: 'same-origin', ...options, headers: { ...(options.body ? { 'Content-Type': 'application/json' } : {}), 'X-FD-Role': this.role, ...(options.headers || {}) } });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (!response.ok) throw Object.assign(new Error(data.error || `HTTP ${response.status}`),{status:response.status});
     return data;
   },
   async login(role, code, extra = {}) { return this.api('/api/auth/login', { method: 'POST', body: JSON.stringify({ role, code, ...extra }) }); },
