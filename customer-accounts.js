@@ -10,7 +10,7 @@ function credentials(body) {
   if (password.length < 12 || password.length > 128 || Buffer.byteLength(password) > 256) fail('Χρειάζεται δοκιμαστικός κωδικός 12–128 χαρακτήρων.');
   return { alias, password };
 }
-function publicAccount(account) { return account ? { id: account.id, alias: account.alias, createdAt: account.createdAt, pilot: true } : null; }
+function publicAccount(account) { return account ? { id: account.id, alias: account.alias, createdAt: account.createdAt, pilot: true, ...(account.credentialKind==='email'?{credentialKind:'email',email:account.email,emailVerified:true}: {}) } : null; }
 function newAccount(alias, passwordHash, salt) { return { id: crypto.randomUUID(), alias, passwordHash, salt, createdAt: new Date().toISOString() }; }
 function checkoutPayment(body, account) {
   const explicit = body.paymentMethod !== undefined;

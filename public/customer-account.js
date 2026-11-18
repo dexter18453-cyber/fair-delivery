@@ -1,14 +1,18 @@
 'use strict';
 (() => {
   const $=id=>document.getElementById(id);
-  let account=null,busy=false;
+  let account=null,busy=false,verifiedConfig=null,verifiedPurpose=null;
   const labels={cash:'Μετρητά',card:'Κάρτα',iris:'IRIS'};
   function message(msg,error=false){FD.notice('accountMessage',msg,error);}
   function display(){
     $('accountGuest').classList.toggle('hidden',Boolean(account));
     $('accountSignedIn').classList.toggle('hidden',!account);
-    $('accountName').textContent=account?.alias||'—';
-    $('checkoutAccountText').textContent=account?'Συνδεδεμένος: '+account.alias:'Συνδέσου ή δημιούργησε δοκιμαστικό λογαριασμό.';
+    $('accountName').textContent=account?.email||account?.alias||'—';
+    $('checkoutAccountText').textContent=account?'Συνδεδεμένος: '+(account.email||account.alias):'Συνδέσου ή δημιούργησε δοκιμαστικό λογαριασμό.';
+    $('verifiedEmailForm').classList.toggle('hidden',!verifiedConfig?.open||Boolean(account));
+    $('accountCheckout').classList.toggle('hidden',account?.credentialKind==='email');
+    $('generateRecovery').disabled=account?.credentialKind==='email';
+    $('verifiedAccountStatus').textContent=account?.credentialKind==='email'?'Το email έχει επιβεβαιωθεί. Οι πραγματικές παραγγελίες παραμένουν κλειστές. Για ανάκτηση χρησιμοποίησε το email σου.':'';
     if(!account)$('accountOrders').textContent='';
   }
   async function refreshOrders(){
@@ -32,6 +36,24 @@
     catch(e){message(e.message,true);}finally{busy=false;}
   }
   $('accountRegister').onclick=()=>auth('register');$('accountLogin').onclick=()=>auth('login');
+  async function loadVerifiedConfig(){
+    try{verifiedConfig=await FD.api('/api/customer/email/config');if(verifiedConfig.open)$('verifiedEmailNotice').textContent='Υπεύθυνος επεξεργασίας: '+verifiedConfig.controller+'\nΕπικοινωνία: '+verifiedConfig.contact+'\n'+verifiedConfig.notice;display();}catch{}
+  }
+  async function verifiedAction(action,purpose){
+    if(busy||!verifiedConfig?.open)return;busy=true;message('');
+    try{
+      const body={email:$('verifiedEmail').value.trim(),password:$('verifiedPassword').value,purpose,code:$('verifiedCode').value.trim(),acknowledged:$('verifiedEmailAck').checked,noticeVersion:verifiedConfig.version};
+      if(action==='start'){delete body.password;delete body.code;}
+      const result=await FD.api('/api/customer/email/'+action,{method:'POST',body:JSON.stringify(body)});
+      if(result.account){account=result.account;display();await refreshOrders();message('Συνδέθηκες με επιβεβαιωμένο email.');}
+      else if(action==='start'){verifiedPurpose=purpose;$('verifiedCodePanel').classList.remove('hidden');message(result.message);}
+      else{verifiedPurpose=null;$('verifiedCodePanel').classList.add('hidden');$('verifiedCode').value='';message(result.message);account=null;display();}
+    }catch(e){message(e.message,true);}finally{busy=false;if(action!=='start')$('verifiedPassword').value='';}
+  }
+  $('verifiedLogin').onclick=()=>verifiedAction('login');
+  $('verifiedSignup').onclick=()=>verifiedAction('start','signup');
+  $('verifiedReset').onclick=()=>verifiedAction('start','reset');
+  $('verifiedFinish').onclick=()=>{if(verifiedPurpose)verifiedAction('finish',verifiedPurpose);};
   async function securityAction(action,body){
     if(busy)return;busy=true;message('');FD.notice('recoveryResult','');
     try{
@@ -49,5 +71,5 @@
   function paymentHint(){const method=$('paymentMethod').value;$('paymentHint').textContent=method==='card'?'Δοκιμή επιλογής κάρτας. Δεν ανοίγει ακόμη πάροχος και δεν γίνεται χρέωση.':method==='iris'?'Δοκιμή επιλογής IRIS. Δεν γίνεται σύνδεση με τράπεζα ούτε μεταφορά χρημάτων.':'Δοκιμή μετρητών. Δεν εισπράττονται χρήματα.';}
   $('paymentMethod').onchange=paymentHint;paymentHint();
   window.FDAccount={current:()=>account,refreshOrders};
-  load().catch(e=>message(e.message,true));
+  load().catch(e=>message(e.message,true));loadVerifiedConfig();
 })();

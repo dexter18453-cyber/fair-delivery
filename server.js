@@ -11,6 +11,8 @@ const storeOperations=require('./store-operations');
 const checkoutReliability=require('./checkout-reliability');
 const checkoutPending=new Map();
 const accountRecovery=require('./account-recovery');
+const verifiedCustomers=require('./verified-customers');
+const emailOperations=new Set();
 const encryptedBackup=require('./encrypted-backup');
 const credentialChanges=new Set();
 let backupBusy=false;
@@ -83,6 +85,8 @@ function normalizeState(parsed = {}) {
     defaultStoreName: parsed.defaultStoreName || 'Πρώτο κατάστημα',
     courierApplications: pruneApplications(parsed.courierApplications),
     customers: parsed.customers && typeof parsed.customers === 'object' && !Array.isArray(parsed.customers) ? parsed.customers : {},
+    emailChallenges:verifiedCustomers.prune(parsed.emailChallenges),
+    emailSendWindow:parsed.emailSendWindow||{day:'',count:0},
     shopSettlements: Array.isArray(parsed.shopSettlements) ? parsed.shopSettlements : [],
     shopPayout: initialPayout(parsed.shopPayout,process.env.NODE_ENV==='production'?process.env:{}),
     shopHolds: parsed.shopHolds || {},
@@ -198,9 +202,10 @@ async function initState() {
 function clearExpiredCourierApplications() {
   if (!state || !Array.isArray(state.courierApplications)) return;
   const remaining = pruneApplications(state.courierApplications);
-  if (remaining.length !== state.courierApplications.length) {
-    state.courierApplications = remaining;
-    persistState().catch(error => console.error('[FairDelivery] applicant retention cleanup failed:', error.message));
+  const challenges=verifiedCustomers.prune(state.emailChallenges);
+  if (remaining.length !== state.courierApplications.length || challenges.length!==state.emailChallenges.length) {
+    state.courierApplications = remaining;state.emailChallenges=challenges;
+    persistState().catch(()=>console.error('[FairDelivery] retention cleanup failed'));
   }
 }
 // An hourly purge runs even if no applicant or administrator opens the site.
@@ -465,6 +470,69 @@ async function handleApi(req, res, url) {
     if (!state.customers[session.userId]) return sendJson(res, 401, { error: 'Ο λογαριασμός δεν είναι ενεργός.' });
     return sendJson(res, 200, { orders: state.orders.filter(o => o.customerId === session.userId).sort((a,b) => b.createdAt.localeCompare(a.createdAt)).map(publicOrder) });
   }
+  if(method==='GET'&&pathname==='/api/customer/email/config'){
+    return sendJson(res,200,{...verifiedCustomers.config(process.env,Boolean(postgresPool)&&!DEMO_MODE),realOrdersEnabled:false});
+  }
+  if(method==='POST'&&['/api/customer/email/start','/api/customer/email/finish','/api/customer/email/login'].includes(pathname)){
+    const config=verifiedCustomers.config(process.env,Boolean(postgresPool)&&!DEMO_MODE);
+    if(!config.open)return sendJson(res,503,{error:'Η επιβεβαιωμένη εγγραφή πελατών δεν έχει ανοίξει ακόμη.'});
+    const origin=req.headers.origin;
+    if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    if(!rateLimit(authWindows,'verified-email:'+clientIp(req),12,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες. Δοκίμασε αργότερα.'});
+    const body=await readJson(req,4096);let email,password;
+    try{email=verifiedCustomers.email(body.email);if(!pathname.endsWith('/start'))password=verifiedCustomers.password(body.password);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
+    const key=verifiedCustomers.emailKey(email);
+    if(!rateLimit(authWindows,'verified-email-key:'+key,8,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες. Δοκίμασε αργότερα.'});
+    if(emailOperations.has(key))return sendJson(res,409,{error:'Εκκρεμεί άλλη ενέργεια. Δοκίμασε σε λίγο.'});
+    emailOperations.add(key);
+    try{
+      let account=Object.values(state.customers).find(a=>a.credentialKind==='email'&&a.email===email);
+      if(pathname.endsWith('/login')){
+        const hash=await riderCodeHash(password,account?.salt||'fd-verified-dummy-salt');
+        if(!account||state.customers[account.id]!==account||credentialChanges.has(account.id)||!safeEqual(hash,account.passwordHash))return sendJson(res,401,{error:'Λάθος email ή κωδικός.'});
+        const prior=getSession(req,'customer');if(prior)sessions.delete(prior.token);
+        const token=crypto.randomBytes(32).toString('hex');sessions.set(token,{role:'customer',userId:account.id,expiresAt:Date.now()+SESSION_TTL_MS});
+        const secure=process.env.NODE_ENV==='production'||process.env.RENDER?'; Secure':'';
+        return sendJson(res,200,{account:publicAccount(account)},{'Set-Cookie':`fd_customer_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS/1000}${secure}`});
+      }
+      const purpose=body.purpose;
+      if(!['signup','reset'].includes(purpose))return sendJson(res,400,{error:'Μη έγκυρη διαδικασία.'});
+      if(purpose==='signup'&&(body.acknowledged!==true||body.noticeVersion!==config.version))return sendJson(res,400,{error:'Διάβασε την ενημέρωση απορρήτου.'});
+      state.emailChallenges=verifiedCustomers.prune(state.emailChallenges);
+      const record=state.emailChallenges.find(c=>c.emailKey===key&&c.purpose===purpose);
+      if(pathname.endsWith('/start')){
+        const generic={received:true,message:'Αν μπορεί να προχωρήσει η διαδικασία, θα λάβεις email με κωδικό. Έλεγξε και τα ανεπιθύμητα.'};
+        if((purpose==='signup'&&account)||(purpose==='reset'&&!account)||record&&Date.now()-record.createdAt<verifiedCustomers.COOLDOWN)return sendJson(res,202,generic);
+        if(state.emailChallenges.length>=200)return sendJson(res,503,{error:'Προσωρινά δεν είναι διαθέσιμη η διαδικασία.'});
+        const day=athensDay();
+        if(state.emailSendWindow.day!==day)state.emailSendWindow={day,count:0};
+        if(state.emailSendWindow.count>=50)return sendJson(res,429,{error:'Ημερήσιο όριο εγγραφών. Δοκίμασε αύριο.'});
+        const next=verifiedCustomers.challenge(email,purpose,purpose==='signup'?config.version:null);
+        state.emailChallenges=state.emailChallenges.filter(c=>c.emailKey!==key||c.purpose!==purpose);state.emailChallenges.push(next.record);state.emailSendWindow.count++;
+        try{await persistState();await verifiedCustomers.deliver(email,purpose,next.token);}catch(e){state.emailChallenges=state.emailChallenges.filter(c=>c!==next.record);await persistState().catch(()=>{});return sendJson(res,503,{error:'Η αποστολή δεν επιβεβαιώθηκε. Δοκίμασε αργότερα.'});}
+        return sendJson(res,202,generic);
+      }
+      if(!verifiedCustomers.matches(record,email,purpose,body.code)||(purpose==='signup'&&record.noticeVersion!==config.version)||(purpose==='signup'&&account)||(purpose==='reset'&&!account))return sendJson(res,400,{error:'Μη έγκυρος ή ληγμένος κωδικός.'});
+      if(purpose==='signup'&&Object.keys(state.customers).length>=200)return sendJson(res,503,{error:'Το μητρώο έχει συμπληρωθεί.'});
+      if(account&&credentialChanges.has(account.id))return sendJson(res,409,{error:'Εκκρεμεί αλλαγή λογαριασμού.'});
+      if(account)credentialChanges.add(account.id);
+      try{
+        const salt=crypto.randomBytes(16).toString('hex'),passwordHash=await riderCodeHash(password,salt);
+        if(!verifiedCustomers.matches(record,email,purpose,body.code)||(account&&state.customers[account.id]!==account)||!state.emailChallenges.includes(record))return sendJson(res,400,{error:'Μη έγκυρος ή ληγμένος κωδικός.'});
+        if(purpose==='signup'&&Object.keys(state.customers).length>=200)return sendJson(res,503,{error:'Το μητρώο έχει συμπληρωθεί.'});
+        const previous=account?{...account}:null;
+        if(purpose==='signup'){account={...newAccount('verified-'+crypto.randomUUID(),passwordHash,salt),credentialKind:'email',email,emailVerifiedAt:nowIso(),privacyVersion:config.version,privacyAcknowledgedAt:nowIso()};state.customers[account.id]=account;}
+        else{account.salt=salt;account.passwordHash=passwordHash;delete account.recoveryHash;}
+        state.emailChallenges=state.emailChallenges.filter(c=>c!==record);
+        try{await persistState();}catch(e){
+          if(previous){account.salt=previous.salt;account.passwordHash=previous.passwordHash;if(previous.recoveryHash)account.recoveryHash=previous.recoveryHash;}else delete state.customers[account.id];
+          state.emailChallenges.push(record);throw e;
+        }
+        for(const [token,old] of sessions)if(old.role==='customer'&&old.userId===account.id)sessions.delete(token);
+        return sendJson(res,200,{completed:true,message:'Η διαδικασία ολοκληρώθηκε. Συνδέσου με email και κωδικό.'},{'Set-Cookie':'fd_customer_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'});
+      }finally{if(purpose==='reset'&&account)credentialChanges.delete(account.id);}
+    }finally{emailOperations.delete(key);}
+  }
   if (method === 'POST' && ['/api/customer/register','/api/customer/login'].includes(pathname)) {
     const origin = req.headers.origin;
     if (origin && origin !== 'https://' + req.headers.host && origin !== 'http://' + req.headers.host) return sendJson(res, 403, { error: 'Μη επιτρεπόμενη προέλευση.' });
@@ -511,7 +579,7 @@ async function handleApi(req, res, url) {
       session=requireRole(req,res,['customer']);if(!session)return;
       account=state.customers[session.userId];
       if(!account)return sendJson(res,401,{error:'Λογαριασμός μη διαθέσιμος.'});
-      try{customerCredentials({alias:account.alias,password:body.password});if(!generate)input=customerCredentials({alias:account.alias,password:body.newPassword});}catch(e){return sendJson(res,400,{error:e.message});}
+      try{if(account.credentialKind==='email'){verifiedCustomers.password(body.password);if(!generate)input={password:verifiedCustomers.password(body.newPassword)};else return sendJson(res,400,{error:'Χρησιμοποίησε ανάκτηση μέσω email.'});}else{customerCredentials({alias:account.alias,password:body.password});if(!generate)input=customerCredentials({alias:account.alias,password:body.newPassword});}}catch(e){return sendJson(res,400,{error:e.message});}
     }
     if(credentialChanges.has(account.id))return sendJson(res,409,{error:'Εκκρεμεί αλλαγή λογαριασμού.'});
     credentialChanges.add(account.id);
@@ -717,6 +785,7 @@ async function handleApi(req, res, url) {
     const id=validStoreId(body.storeId===undefined?'default':body.storeId);const store=id&&getStore(state,id);
     const customerSession = getSession(req, 'customer');
     const customerAccount = customerSession ? state.customers[customerSession.userId] : null;
+    if(customerAccount?.credentialKind==='email')return sendJson(res,409,{error:'Οι πραγματικές παραγγελίες δεν έχουν ενεργοποιηθεί ακόμη.'});
     let requestId,requestDigest;
     try{requestId=checkoutReliability.requestKey(body,customerAccount);if(requestId)requestDigest=checkoutReliability.digest(body,id);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
     const pendingKey=requestId?customerAccount.id+':'+requestId:null;
