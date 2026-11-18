@@ -16,7 +16,7 @@ async function main(){
  if(process.env.DATABASE_URL&&process.env.DATABASE_URL===process.env.NEON_MIGRATION_DATABASE_URL)throw Error('Δεν επιτρέπεται να τρέξει ο server με τον ίδιο URL κατά τη μεταφορά.');
  const target=targetUrl(process.env.NEON_MIGRATION_DATABASE_URL);
  const stat=await fs.stat(file);if(stat.size>45*1024*1024)throw Error('Το κρυπτογραφημένο αντίγραφο υπερβαίνει το όριο μεγέθους.');
- const phrase=(await new Promise((resolve,reject)=>{let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>{input+=x;if(input.length>512)reject(Error('Υπερβολικά μεγάλη φράση.'));});process.stdin.on('end',()=>resolve(input.replace(/\r?\n$/,'')));process.stdin.on('error',reject);})).trim();
+ const phrase=(await new Promise((resolve,reject)=>{let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>{input+=x;if(input.length>512)reject(Error('Υπερβολικά μεγάλη φράση.'));});process.stdin.on('end',()=>resolve(input.replace(/\r?\n$/,'')));process.stdin.on('error',reject);}));
  const state=await decryptBackup(JSON.parse(await fs.readFile(file,'utf8')),phrase);
  const summary=validateSnapshot(state);
  const apply=args.includes('--apply');
