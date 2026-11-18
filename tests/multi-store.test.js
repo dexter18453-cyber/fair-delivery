@@ -62,6 +62,8 @@ test('multi-store API isolates menus and credentials, order routing and billing'
   assert.equal((await call('/api/config?storeId='+storeB)).data.acceptingOrders,true);
   await call('/api/shop/operations','shop',sa,'PATCH',{paused:false});
   assert.equal((await call('/api/config?storeId='+storeA)).data.store.etaMax,35);
+  await call('/api/orders','customer',customer,'POST',{...contact,storeId:storeA,items:[{productId:pa.id,qty:1}]},409);
+  await call('/api/orders','customer',customer,'POST',{...contact,deliveryLocation:{lat:38.1,lng:23.7},storeId:storeA,items:[{productId:pa.id,qty:2}]},409);
   await call('/api/shop/operations','customer',customer,'PATCH',{paused:true},401);
   assert.equal((await call('/api/orders','shop',sb)).data.orders.length,0);
   await call('/api/orders/'+order.id,'shop',sb,'PATCH',{status:'accepted'},403);
