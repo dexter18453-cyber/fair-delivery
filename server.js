@@ -689,7 +689,7 @@ async function handleApi(req, res, url) {
         if (!(await shopCodeMatches(String(body.code || '')))) return sendJson(res, 401, { error: 'Λάθος κωδικός καταστήματος. Μπορείς να εκδώσεις νέο από το Control Center.' });
         }
       } else {
-        if(!adminAuth.emailMatches(body.email,process.env.FD_ADMIN_LOGIN_EMAIL))return sendJson(res,401,{error:'Λάθος email ή κωδικός διαχειριστή.'});
+        if(!adminAuth.emailMatches(body.email,DEMO_MODE?'':process.env.FD_ADMIN_LOGIN_EMAIL))return sendJson(res,401,{error:'Λάθος email ή κωδικός διαχειριστή.'});
         if(!state.adminCredential&&!expected)return sendJson(res,503,{error:'Δεν έχει οριστεί κωδικός διαχειριστή στον server.'});
         if(!(await adminPasswordMatches(String(body.code||''))))return sendJson(res,401,{error:'Λάθος email ή κωδικός διαχειριστή.'});
       }
