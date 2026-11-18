@@ -201,6 +201,7 @@ async function initState() {
 }
 
 function clearExpiredCourierApplications() {
+  if(process.env.FD_MAINTENANCE_MODE==='true')return;
   if (!state || !Array.isArray(state.courierApplications)) return;
   const remaining = pruneApplications(state.courierApplications);
   const challenges=verifiedCustomers.prune(state.emailChallenges);
@@ -356,9 +357,15 @@ function offlineHelp(question) {
 async function handleApi(req, res, url) {
   const pathname = url.pathname;
   const method = req.method;
+  const maintenance=process.env.FD_MAINTENANCE_MODE==='true';
+  // Manual freeze for a final consistent export. No order/account/shop writes
+  // while this mode is enabled, including legacy guest APIs.
+  if(maintenance&&!['GET','HEAD'].includes(method)&&!(method==='POST'&&['/api/auth/login','/api/admin/backup'].includes(pathname))){
+    return sendJson(res,503,{error:'Το Fair Delivery βρίσκεται σε προγραμματισμένη συντήρηση. Οι νέες καταχωρίσεις είναι προσωρινά απενεργοποιημένες.'},{'Retry-After':'600'});
+  }
 
   if (method === 'GET' && pathname === '/api/health') {
-    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.3.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: fairAssistant.configured(), aiModel: fairAssistant.configured()?fairAssistant.MODEL:null, storage: postgresPool ? 'postgres' : 'temporary-file' });
+    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.3.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: fairAssistant.configured(), aiModel: fairAssistant.configured()?fairAssistant.MODEL:null, storage: postgresPool ? 'postgres' : 'temporary-file', maintenance });
   }
 
 
