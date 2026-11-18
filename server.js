@@ -4,6 +4,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const adminAuth = require('./admin-auth');
+let adminPasswordChanging=false;
 const courierInterest=require('./courier-interest');
 const fairAssistant=require('./fair-assistant');
 const { storeId:validStoreId, allStores, getStore, publicStore, newStore }=require('./stores');
@@ -84,6 +86,8 @@ function normalizeState(parsed = {}) {
     orders: Array.isArray(parsed.orders) ? parsed.orders : [],
     riders: parsed.riders && typeof parsed.riders === 'object' ? parsed.riders : {},
     shopCredential: parsed.shopCredential || null,
+    adminCredential:parsed.adminCredential||null,
+    adminSessions:adminAuth.prune(parsed.adminSessions),
     stores: parsed.stores && typeof parsed.stores==='object' && !Array.isArray(parsed.stores)?parsed.stores:{},
     defaultStoreName: parsed.defaultStoreName || 'Πρώτο κατάστημα',
     courierApplications: pruneApplications(parsed.courierApplications),
@@ -283,6 +287,11 @@ function getSession(req, roleHint) {
   for (const role of ordered) {
     const token = cookies[`fd_${role}_session`];
     if (!token) continue;
+    if(role==='admin'){
+      const persistent=adminAuth.lookup(state?.adminSessions,token);
+      if(persistent)return persistent;
+      continue;
+    }
     const session = sessions.get(token);
     if (!session || session.expiresAt < Date.now()) { sessions.delete(token); continue; }
     if (session.role === role) return { ...session, token };
@@ -330,6 +339,16 @@ async function shopCodeMatches(input) {
     return safeEqual(hash, state.shopCredential.codeHash);
   }
   return safeEqual(input, roleCode('shop'));
+}
+
+async function adminPasswordMatches(code){
+  if(typeof code!=='string'||!code)return false;
+  const credential=state.adminCredential;
+  if(credential?.salt&&credential?.hash){
+    const digest=await riderCodeHash(code,credential.salt);
+    return safeEqual(digest,credential.hash);
+  }
+  return safeEqual(code,roleCode('admin'));
 }
 
 function validateMoney(value, name, max = 5000) {
@@ -639,6 +658,7 @@ async function handleApi(req, res, url) {
     const body = await readJson(req, 4096);
     const role = ['shop', 'rider', 'admin'].includes(body.role) ? body.role : '';
     if (!role) return sendJson(res, 400, { error: 'Μη έγκυρος ρόλος.' });
+    if(role==='admin'&&adminPasswordChanging)return sendJson(res,409,{error:'Εκκρεμεί αλλαγή κωδικού. Δοκίμασε σε λίγο.'});
 
     let userId = `${role}-${crypto.randomUUID()}`;
     let storeId = 'default';
@@ -669,15 +689,24 @@ async function handleApi(req, res, url) {
         if (!(await shopCodeMatches(String(body.code || '')))) return sendJson(res, 401, { error: 'Λάθος κωδικός καταστήματος. Μπορείς να εκδώσεις νέο από το Control Center.' });
         }
       } else {
-        if (!expected) return sendJson(res, 503, { error: 'Δεν έχει οριστεί κωδικός διαχειριστή στον server.' });
-        if (!safeEqual(String(body.code || ''), expected)) return sendJson(res, 401, { error: 'Λάθος κωδικός διαχειριστή.' });
+        if(!adminAuth.emailMatches(body.email,process.env.FD_ADMIN_LOGIN_EMAIL))return sendJson(res,401,{error:'Λάθος email ή κωδικός διαχειριστή.'});
+        if(!state.adminCredential&&!expected)return sendJson(res,503,{error:'Δεν έχει οριστεί κωδικός διαχειριστή στον server.'});
+        if(!(await adminPasswordMatches(String(body.code||''))))return sendJson(res,401,{error:'Λάθος email ή κωδικός διαχειριστή.'});
       }
     }
 
-    const token = crypto.randomBytes(32).toString('hex');
-    sessions.set(token, { role, userId, storeId, expiresAt: Date.now() + SESSION_TTL_MS });
+    let token,ttl=SESSION_TTL_MS;
+    if(role==='admin'){
+      const created=adminAuth.issue(state.adminSessions);const previous=state.adminSessions;
+      state.adminSessions=created.sessions;
+      try{await persistState();}catch(e){state.adminSessions=previous;throw e;}
+      token=created.token;ttl=adminAuth.SESSION_TTL_MS;
+    }else{
+      token=crypto.randomBytes(32).toString('hex');
+      sessions.set(token,{role,userId,storeId,expiresAt:Date.now()+ttl});
+    }
     const secure = process.env.NODE_ENV === 'production' || process.env.RENDER ? '; Secure' : '';
-    return sendJson(res, 200, { ok: true, role, userId, riderName, expiresInSeconds: SESSION_TTL_MS / 1000 }, { 'Set-Cookie': `fd_${role}_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}${secure}` });
+    return sendJson(res, 200, { ok: true, role, userId, riderName, expiresInSeconds: ttl / 1000 }, { 'Set-Cookie': `fd_${role}_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${ttl / 1000}${secure}` });
   }
 
   if (method === 'POST' && pathname === '/api/auth/logout') {
@@ -686,6 +715,10 @@ async function handleApi(req, res, url) {
     const session = role ? getSession(req, role) : null;
     if (session) {
       sessions.delete(session.token);
+      if(session.role==='admin'){
+        const old=state.adminSessions;state.adminSessions=adminAuth.revoke(old,session.token);
+        try{await persistState();}catch(e){state.adminSessions=old;throw e;}
+      }
       if (session.role === 'rider' && state.riders[session.userId]) {
         state.riders[session.userId].online = false;
         hideRiderLocation(session.userId);
@@ -694,6 +727,26 @@ async function handleApi(req, res, url) {
     }
     const cookieName = role ? `fd_${role}_session` : 'fd_admin_session';
     return sendJson(res, 200, { ok: true }, { 'Set-Cookie': `${cookieName}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` });
+  }
+
+  if(method==='POST'&&pathname==='/api/admin/change-password'){
+    const session=requireRole(req,res,['admin']);if(!session)return;
+    const origin=req.headers.origin;
+    if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    if(!rateLimit(authWindows,'admin-change:'+clientIp(req),5,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες αλλαγής κωδικού.'});
+    if(adminPasswordChanging)return sendJson(res,409,{error:'Εκκρεμεί άλλη αλλαγή κωδικού.'});
+    const body=await readJson(req,2048);
+    let newPassword;
+    try{newPassword=adminAuth.validatePassword(body.newCode,process.env.FD_ADMIN_LOGIN_EMAIL);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
+    adminPasswordChanging=true;
+    try{
+      if(!(await adminPasswordMatches(String(body.currentCode||''))))return sendJson(res,401,{error:'Ο τρέχων κωδικός δεν είναι σωστός.'});
+      const salt=crypto.randomBytes(16).toString('hex'),hash=await riderCodeHash(newPassword,salt);
+      const previous={credential:state.adminCredential,sessions:state.adminSessions};
+      state.adminCredential={salt,hash,updatedAt:nowIso()};state.adminSessions=[];
+      try{await persistState();}catch(e){state.adminCredential=previous.credential;state.adminSessions=previous.sessions;throw e;}
+      return sendJson(res,200,{changed:true,logoutRequired:true},{'Set-Cookie':'fd_admin_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'});
+    }finally{adminPasswordChanging=false;}
   }
 
   if (method === 'GET' && pathname === '/api/auth/me') {
@@ -936,7 +989,7 @@ async function handleApi(req, res, url) {
     if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
     if(!rateLimit(authWindows,'shop-controls:'+clientIp(req),15,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες.'});
     const body=await readJson(req,4096);
-    if(!roleCode('admin')||!safeEqual(String(body.adminCode||''),roleCode('admin')))return sendJson(res,403,{error:'Απαιτείται επιβεβαίωση με τον κωδικό Admin.'});
+    if(!(await adminPasswordMatches(String(body.adminCode||''))))return sendJson(res,403,{error:'Απαιτείται επιβεβαίωση με τον κωδικό Admin.'});
     const storeId=validStoreId(body.storeId||'default');if(!storeId||!getStore(state,storeId))return sendJson(res,404,{error:'Το κατάστημα δεν βρέθηκε.'});
     if(pathname.endsWith('shop-payout')){
       let payout;
@@ -993,7 +1046,7 @@ async function handleApi(req, res, url) {
     if(migrationCopyBusy)return sendJson(res,409,{error:'Εκκρεμεί άλλη μεταφορά.'});
     if(!rateLimit(authWindows,'migration-copy:'+clientIp(req),3,15*60*1000))return sendJson(res,429,{error:'Πολλές προσπάθειες μεταφοράς.'});
     const body=await readJson(req,4096);
-    if(!safeEqual(String(body.adminCode||''),roleCode('admin')))return sendJson(res,403,{error:'Απαιτείται επαλήθευση κωδικού Admin.'});
+    if(!(await adminPasswordMatches(String(body.adminCode||''))))return sendJson(res,403,{error:'Απαιτείται επαλήθευση κωδικού Admin.'});
     if(body.confirmDownloadedBackup!==true||body.confirmNewDatabase!==true||typeof body.expectedDigest!=='string'||!/^[a-f0-9]{64}$/.test(body.expectedDigest))return sendJson(res,400,{error:'Χρειάζεται επαληθευμένο κρυπτογραφημένο αντίγραφο και ακριβές SHA-256.'});
     try{
       const sourceUrl=new URL(process.env.DATABASE_URL),targetUrl=new URL(migrationTarget.targetConnection(process.env.FD_MIGRATION_TARGET_DATABASE_URL));
@@ -1042,7 +1095,7 @@ async function handleApi(req, res, url) {
     if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
     if(!rateLimit(authWindows,'backup:'+clientIp(req),4,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες.'});
     const body=await readJson(req,4096);
-    if(!safeEqual(String(body.adminCode||''),roleCode('admin')))return sendJson(res,403,{error:'Χρειάζεται ο κωδικός Admin.'});
+    if(!(await adminPasswordMatches(String(body.adminCode||''))))return sendJson(res,403,{error:'Χρειάζεται ο κωδικός Admin.'});
     if(body.confirm!==true||!encryptedBackup.validPhrase(body.passphrase))return sendJson(res,400,{error:'Επιβεβαίωσε την εξαγωγή και φράση κρυπτογράφησης 20–256 χαρακτήρων.'});
     if(backupBusy)return sendJson(res,409,{error:'Εκκρεμεί άλλη εξαγωγή.'});
     backupBusy=true;
