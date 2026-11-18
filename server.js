@@ -486,6 +486,15 @@ async function handleApi(req, res, url) {
     const info=adminPush.config();
     return sendJson(res,200,{enabled:info.available,publicKey:info.publicKey,subscribedDevices:adminPush.prune(state.adminPushSubscriptions).length,requiresInstalledApp:true});
   }
+  if(pathname==='/api/admin/push/test'&&method==='POST'){
+    if(!requireRole(req,res,['admin']))return;
+    if(!rateLimit(authWindows,'push-test:'+clientIp(req),3,15*60*1000))return sendJson(res,429,{error:'Μπορείς να στείλεις άλλη δοκιμή αργότερα.'});
+    const subscriptions=adminPush.prune(state.adminPushSubscriptions);
+    if(!adminPush.config().available||!subscriptions.length)return sendJson(res,409,{error:'Πρώτα ενεργοποίησε τις ειδοποιήσεις σε τουλάχιστον μία συσκευή.'});
+    const tests=await Promise.allSettled(subscriptions.map(sub=>adminPush.send(sub,{type:'test-notification',id:crypto.randomUUID(),url:'/app/admin/#applications'})));
+    const accepted=tests.filter(x=>x.status==='fulfilled'&&x.value.ok).length;
+    return sendJson(res,200,{attempted:subscriptions.length,accepted});
+  }
   if(pathname==='/api/admin/push/subscription'&&['POST','DELETE'].includes(method)){
     if(!requireRole(req,res,['admin']))return;
     const origin=req.headers.origin;
@@ -1437,7 +1446,7 @@ async function serveRoleApp(req, res, url) {
     mime='image/png';cacheControl='public, max-age=604800, immutable';
   } else if (asset === 'sw.js') {
     content = `'use strict';const OFFLINE='${scope}offline.html';const CACHE='fd-pwa-${role}-offline-v1';self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.add(OFFLINE)).then(()=>self.skipWaiting()));});self.addEventListener('activate',event=>{event.waitUntil(self.clients.claim());});self.addEventListener('fetch',event=>{const url=new URL(event.request.url);if(event.request.mode!=='navigate'||url.origin!==self.location.origin||!url.pathname.startsWith('${scope}'))return;event.respondWith(fetch(event.request).catch(()=>caches.match(OFFLINE)));});`;
-    if(role==='admin')content += `self.addEventListener('push',event=>{event.waitUntil((async()=>{let payload={};try{payload=event.data?event.data.json():{};}catch{}if(payload.type!=='new-application')return;await self.registration.showNotification('Νέο αίτημα στο Fair Delivery',{body:'Υπάρχει νέα δήλωση ενδιαφέροντος. Άνοιξε τις Αιτήσεις.',tag:'fd-request-'+String(payload.id||Date.now()),icon:'/app/admin/icon-192.png',badge:'/app/admin/icon-192.png',data:{url:'/app/admin/#applications'}});})());});self.addEventListener('notificationclick',event=>{event.notification.close();event.waitUntil((async()=>{const target=new URL('/app/admin/#applications',self.location.origin);const windows=await clients.matchAll({type:'window',includeUncontrolled:true});for(const w of windows){if(new URL(w.url).origin===target.origin&&new URL(w.url).pathname.startsWith('/app/admin/')){await w.focus();w.navigate(target.href);return;}}await clients.openWindow(target.href);})());});`;
+    if(role==='admin')content += `self.addEventListener('push',event=>{event.waitUntil((async()=>{let payload={};try{payload=event.data?event.data.json():{};}catch{}if(!['new-application','test-notification'].includes(payload.type))return;const isTest=payload.type==='test-notification';await self.registration.showNotification(isTest?'Δοκιμαστική ειδοποίηση':'Νέο αίτημα στο Fair Delivery',{body:isTest?'Οι ειδοποιήσεις του Fair Delivery λειτουργούν.':'Υπάρχει νέα δήλωση ενδιαφέροντος. Άνοιξε τις Αιτήσεις.',tag:'fd-request-'+String(payload.id||Date.now()),icon:'/app/admin/icon-192.png',badge:'/app/admin/icon-192.png',data:{url:'/app/admin/#applications'}});})());});self.addEventListener('notificationclick',event=>{event.notification.close();event.waitUntil((async()=>{const target=new URL('/app/admin/#applications',self.location.origin);const windows=await clients.matchAll({type:'window',includeUncontrolled:true});for(const w of windows){if(new URL(w.url).origin===target.origin&&new URL(w.url).pathname.startsWith('/app/admin/')){await w.focus();w.navigate(target.href);return;}}await clients.openWindow(target.href);})());});`;
     mime='application/javascript; charset=utf-8';
   } else {
     content = `<!doctype html><html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Fair Delivery — Χωρίς σύνδεση</title><style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#0a0d15;color:#fff;font:16px system-ui;text-align:center;padding:24px}section{max-width:400px}a{color:#ff6b76}</style></head><body><section><h1>Fair Delivery ${config.label}</h1><p>Δεν υπάρχει σύνδεση στο διαδίκτυο. Για τις ζωντανές παραγγελίες χρειάζεται πρόσβαση στο δίκτυο.</p><a href="${scope}">Δοκίμασε ξανά</a></section></body></html>`;
