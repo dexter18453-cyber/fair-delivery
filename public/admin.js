@@ -296,6 +296,14 @@ async function toggleApplicationPush(){
  finally{appNotificationBusy=false;button.disabled=false;}
 }
 $('applicationPushButton').onclick=()=>toggleApplicationPush();
+$('applicationPushTest').onclick=async()=>{
+ const b=$('applicationPushTest');b.disabled=true;
+ try{
+  const r=await FD.api('/api/admin/push/test',{method:'POST',body:'{}'});
+  FD.notice('applicationNotificationStatus','Αποστολή δοκιμής: '+r.accepted+' από '+r.attempted+' συσκευές αποδέχτηκαν το αίτημα. Αν δεν εμφανίστηκε στο iPhone, έλεγξε την άδεια ειδοποιήσεων.');
+ }catch(e){FD.notice('applicationNotificationStatus',e.message,true);}
+ finally{b.disabled=false;}
+};
 
 $('reloadCourierApplications').addEventListener('click',()=>loadCourierApplications().catch(e=>FD.notice('courierApplicationNotice',e.message,true)));
 boot().catch(e=>{$('mode').textContent='Σφάλμα σύνδεσης: '+e.message;});
