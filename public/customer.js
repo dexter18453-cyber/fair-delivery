@@ -74,10 +74,13 @@ $('placeOrder').addEventListener('click', async () => {
       FD.notice('notice', 'Συμπλήρωσε όνομα, τηλέφωνο, διεύθυνση και επίλεξε σημείο στον χάρτη.', true); return;
     }
     if (!$('privacyConsent').checked) { FD.notice('notice', 'Χρειάζεται να συμφωνήσεις με τη χρήση των στοιχείων για την πιλοτική παραγγελία.', true); return; }
+    const paymentMethod = $('paymentMethod')?.value;
+    if (paymentMethod && !window.FDAccount?.current()) { FD.notice('notice','Συνδέσου πρώτα στον λογαριασμό σου.',true); window.FDUI?.show('account'); return; }
+    if (paymentMethod && !$('confirmSimulation').checked) { FD.notice('notice','Επιβεβαίωσε ότι η πληρωμή είναι δοκιμαστική.',true); return; }
     submitting = true; renderCart();
     const items = [...cart].map(([productId, qty]) => ({ productId, qty }));
-    const result = await FD.api('/api/orders', { method: 'POST', body: JSON.stringify({ items, customerName: $('customerName').value.trim(), customerPhone: $('customerPhone').value.trim(), deliveryAddress: $('deliveryAddress').value.trim(), deliveryLocation: { lat, lng }, privacyConsent: true }) });
-    cart.clear(); renderCart(); FD.notice('notice', 'Η πιλοτική παραγγελία καταχωρίστηκε. Δεν έγινε χρέωση.'); showTracking(result.order.id);
+    const result = await FD.api('/api/orders', { method: 'POST', body: JSON.stringify({ items, customerName: $('customerName').value.trim(), customerPhone: $('customerPhone').value.trim(), deliveryAddress: $('deliveryAddress').value.trim(), deliveryLocation: { lat, lng }, privacyConsent: true, ...(paymentMethod ? {paymentMethod, confirmPaymentSimulation: true} : {}) }) });
+    cart.clear(); renderCart(); FD.notice('notice', 'Η πιλοτική παραγγελία καταχωρίστηκε. Δεν έγινε χρέωση.'); window.FDAccount?.refreshOrders().catch(()=>{}); showTracking(result.order.id);
   } catch (e) { FD.notice('notice', e.message, true); }
   finally { submitting = false; renderCart(); }
 });
@@ -104,7 +107,7 @@ async function refreshTracking() {
   try {
     const r = await FD.api(`/api/orders/${encodeURIComponent(currentOrderId)}`); const o = r.order;
     $('orderStatus').textContent = FD.status(o.status); $('orderStatus').className = 'status ' + (o.status === 'delivered' ? 'good' : o.status === 'cancelled' ? 'bad' : 'wait');
-    $('trackingInfo').textContent = `Σύνολο ${FD.money(o.total)} · Δημιουργήθηκε ${new Date(o.createdAt).toLocaleString('el-GR')}`;
+    $('trackingInfo').textContent = `Σύνολο ${FD.money(o.total)} · Δημιουργήθηκε ${new Date(o.createdAt).toLocaleString('el-GR')}${o.paymentMethod ? ' · '+({cash:'Μετρητά',card:'Κάρτα',iris:'IRIS'}[o.paymentMethod]||'—')+' · Δοκιμή χωρίς πληρωμή' : ''}`;
     $('trackingCoords').textContent = o.riderLocation ? 'Εμφανίζεται η τελευταία θέση που κοινοποίησε ο διανομέας.' : 'Δεν έχει κοινοποιηθεί ακόμη θέση διανομέα.';
     renderTrackingMap(o);
     if (['delivered', 'cancelled'].includes(o.status) && trackingTimer) { clearInterval(trackingTimer); trackingTimer = null; }
