@@ -78,6 +78,10 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   assert.equal(courierPage.status,200);
   assert.match(await courierPage.text(),/Γίνε συνεργάτης|Οδήγησε με τους δικούς σου όρους/);
   assert.equal((await fetch(base+'/courier-apply.js')).status,200);
+  const emailConfig=await api('/api/customer/email/config');
+  assert.equal(emailConfig.open,false);
+  const realSignup=await fetch(base+'/api/customer/email/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:'test@example.test',purpose:'signup'})});
+  assert.equal(realSignup.status,503);
   const intakeConfig=await api('/api/courier-applications/config');
   assert.equal(intakeConfig.open,true);
   assert.equal(intakeConfig.automaticApproval,false);
