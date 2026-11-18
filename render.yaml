@@ -1,5 +1,9 @@
-# Fair Delivery 1.3 single-store pilot on the existing Render service.
-# Existing PostgreSQL connection is injected by Render (no credentials committed).
+# Fair Delivery: current existing Render service, free web plan.
+# The live DATABASE_URL is set privately on the Render service.
+# Do not automatically bind the 30-day expiring Render Free PostgreSQL again.
+# On a new Blueprint installation, DATABASE_URL must be provided explicitly
+# by the owner after verifying a durable, properly migrated Postgres destination.
+# Do not set ALLOW_EMPTY_PRODUCTION_STATE=true to bypass an empty database.
 services:
   - type: web
     name: fair-delivery
@@ -17,6 +21,4 @@ services:
       - key: ALLOW_EMPTY_PRODUCTION_STATE
         value: "false"
       - key: DATABASE_URL
-        fromDatabase:
-          name: fair-delivery-pilot-db
-          property: connectionString
+        sync: false
