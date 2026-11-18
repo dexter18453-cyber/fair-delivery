@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const courierInterest=require('./courier-interest');
 const fairAssistant=require('./fair-assistant');
 const { storeId:validStoreId, allStores, getStore, publicStore, newStore }=require('./stores');
+const storeOperations=require('./store-operations');
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
 const {paymentDetails,shopHold,initialPayout,visiblePayout}=require('./shop-controls');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
@@ -90,6 +91,7 @@ function publicOrder(order) {
   return {
     id: order.id, storeId: order.storeId||'default', storeName: getStore(state,order.storeId||'default')?.name||'Κατάστημα', items: order.items, subtotal: order.subtotal, serviceFee: order.serviceFee,
     deliveryFee: order.deliveryFee || 0,
+    etaMin:order.etaMin??null,etaMax:order.etaMax??null,deliveryDistanceKm:order.deliveryDistanceKm??null,
     total: order.total, status: order.status, createdAt: order.createdAt, updatedAt: order.updatedAt,
     paymentMethod: order.paymentMethod || 'cash', paymentStatus: order.paymentStatus || 'pilot_not_charged', paymentMode: 'simulation', paymentCollected: false,
     estimatedKm: order.estimatedKm ?? null, badWeather: Boolean(order.badWeather),
@@ -609,7 +611,7 @@ async function handleApi(req, res, url) {
     const id=session?.storeId||validStoreId(url.searchParams.get('storeId')||'default');
     const store=id&&getStore(state,id);
     if(!store||(!store.active&&!session))return sendJson(res,404,{error:'Το κατάστημα δεν είναι διαθέσιμο.'});
-    const settings={...state.settings,shopDeliveryFee:store.settings.shopDeliveryFee||0,storeLocation:store.settings.storeLocation||null};
+    const settings={...state.settings,shopDeliveryFee:store.settings.shopDeliveryFee||0,storeLocation:store.settings.storeLocation||null,operations:storeOperations.settings(store)};
     return sendJson(res,200,{settings,storeLocation:settings.storeLocation,demoMode:DEMO_MODE,store:publicStore(state,store),acceptingOrders:publicStore(state,store).acceptingOrders});
   }
 
@@ -698,9 +700,11 @@ async function handleApi(req, res, url) {
       lines.push({ productId: product.id, name: product.name, unitPrice: product.price, qty, lineTotal: round2(product.price * qty) });
     }
     const subtotal = round2(lines.reduce((sum, line) => sum + line.lineTotal, 0));
+    let deliveryQuote;
+    try{deliveryQuote=storeOperations.checkCheckout(state,store,{lat:deliveryLat,lng:deliveryLng},subtotal);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
     const order = {
       id: crypto.randomUUID(), storeId: store.id, items: lines, subtotal,
-      ...payment, customerId: customerAccount?.id || null, trackingPrivate: Boolean(customerAccount),
+      ...payment, ...deliveryQuote, customerId: customerAccount?.id || null, trackingPrivate: Boolean(customerAccount),
       customerName, customerPhone, deliveryAddress,
       deliveryLocation: { lat: deliveryLat, lng: deliveryLng },
       serviceFee: 0, deliveryFee: round2(store.settings.shopDeliveryFee||0),
@@ -710,7 +714,6 @@ async function handleApi(req, res, url) {
       estimatedKm: null, badWeather: false, riderPayEstimate: null,
       assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
     };
-    if(!store.active||state.shopHolds[store.id]?.suspended) return sendJson(res,409,{error:'Το κατάστημα δεν δέχεται προσωρινά νέες παραγγελίες.'});
     state.orders.push(order); await persistState();
     return sendJson(res, 201, { order: publicOrder(order), trackingUrl: `/app/customer/?order=${encodeURIComponent(order.id)}` });
   }
@@ -907,6 +910,23 @@ async function handleApi(req, res, url) {
     for (const [token, oldSession] of sessions) if (oldSession.role === 'rider' && oldSession.userId === rider.id) sessions.delete(token);
     await persistState();
     return sendJson(res, 200, { riderId: rider.id, accessCode, warning: postgresPool ? null : 'Χωρίς μόνιμη βάση ο κωδικός μπορεί να χαθεί σε νέο deployment.' });
+  }
+
+  if(pathname==='/api/shop/operations'&&['GET','PATCH'].includes(method)){
+    const session=requireRole(req,res,['shop']);if(!session)return;
+    const store=getStore(state,session.storeId||'default');
+    if(!store)return sendJson(res,404,{error:'Το κατάστημα δεν βρέθηκε.'});
+    const current=storeOperations.settings(store);
+    if(method==='GET')return sendJson(res,200,{operations:current,store:publicStore(state,store)});
+    const origin=req.headers.origin;
+    if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    const body=await readJson(req,4096);
+    let next;
+    try{next=storeOperations.validated(Object.keys(body).length===1&&typeof body.paused==='boolean'?{...current,paused:body.paused}:body);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
+    if(next.radiusKm!==null&&!store.settings.storeLocation)return sendJson(res,409,{error:'Όρισε πρώτα το σημείο καταστήματος στον χάρτη.'});
+    const old=store.settings.operations;store.settings.operations=next;
+    try{await persistState();}catch(e){if(old)store.settings.operations=old;else delete store.settings.operations;throw e;}
+    return sendJson(res,200,{operations:next,store:publicStore(state,store)});
   }
 
   if (method === 'POST' && pathname === '/api/shop/location') {
