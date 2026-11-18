@@ -122,7 +122,7 @@ $('askAi').addEventListener('click',async()=>{
   const message=$('question').value.trim();if(!message)return;
   if(!$('externalAiConsent').checked){FD.notice('aiMsg','Επιβεβαίωσε ότι η ερώτηση δεν έχει προσωπικά ή εμπιστευτικά στοιχεία.',true);return;}
   appendBubble('me',message);$('question').value='';$('askAi').disabled=true;FD.notice('aiMsg','Το GPT-OSS 120B επεξεργάζεται την ερώτηση…');
-  try{const r=await FD.api('/api/assistant',{method:'POST',body:JSON.stringify({message,externalConfirmed:true})});appendBubble('assistant',r.answer);FD.notice('aiMsg','Απάντηση AI · μπορεί να περιέχει λάθη.');}
+  try{const r=await FD.api('/api/assistant',{method:'POST',body:JSON.stringify({message,externalConfirmed:true})});appendBubble('assistant',r.answer,true);FD.notice('aiMsg',r.truncated?'Η απάντηση έφτασε στο όριο. Ζήτησε πιο σύντομη απάντηση ή το επόμενο μέρος.':'Απάντηση AI · μπορεί να περιέχει λάθη.',r.truncated===true);}
   catch(e){FD.notice('aiMsg',e.message,true);}finally{$('askAi').disabled=false;}
 });
 document.querySelectorAll('[data-local-report]').forEach(button=>button.onclick=async()=>{
@@ -131,6 +131,32 @@ document.querySelectorAll('[data-local-report]').forEach(button=>button.onclick=
 });
 $('clearAiChat').onclick=()=>{$('chatLog').replaceChildren();appendBubble('assistant','Τι θέλεις να δούμε;');FD.notice('aiMsg','');};
 
-function appendBubble(role,text){const node=document.createElement('div');node.className='bubble'+(role==='me'?' me':'');node.textContent=text;$('chatLog').appendChild(node);$('chatLog').scrollTop=$('chatLog').scrollHeight;}
+function appendBubble(role,text,formatted=false){const node=document.createElement('div');node.className='bubble'+(role==='me'?' me':'');if(formatted){node.classList.add('ai-formatted');renderAiText(node,text);}else node.textContent=text;$('chatLog').appendChild(node);$('chatLog').scrollTop=$('chatLog').scrollHeight;}
 $('reloadCourierApplications').addEventListener('click',()=>loadCourierApplications().catch(e=>FD.notice('courierApplicationNotice',e.message,true)));
 boot().catch(e=>{$('mode').textContent='Σφάλμα σύνδεσης: '+e.message;});
+
+ // Render only safe text nodes and a small Markdown subset. No HTML, links or scripts from AI.
+function aiInline(node,text){
+ const parts=String(text).split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/g);
+ for(const part of parts){if(part.startsWith('**')&&part.endsWith('**')&&part.length>4){const el=document.createElement('strong');el.textContent=part.slice(2,-2);node.appendChild(el);}else if(part.startsWith('`')&&part.endsWith('`')&&part.length>2){const el=document.createElement('code');el.textContent=part.slice(1,-1);node.appendChild(el);}else node.appendChild(document.createTextNode(part));}
+}
+function renderAiText(root,text){
+ const lines=String(text||'').split(/\r?\n/);
+ let list=null;
+ const cells=line=>line.trim().replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+ const separator=line=>/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line||'');
+ for(let i=0;i<lines.length;i++){
+  const line=lines[i].trim();if(!line){list=null;continue;}
+  if(line.includes('|')&&separator(lines[i+1])){
+   list=null;const wrap=document.createElement('div');wrap.className='ai-table-wrap';const table=document.createElement('table');
+   const row=(value,header)=>{const tr=document.createElement('tr');for(const cell of cells(value)){const td=document.createElement(header?'th':'td');aiInline(td,cell);tr.appendChild(td);}return tr;};
+   const head=document.createElement('thead');head.appendChild(row(line,true));table.appendChild(head);const body=document.createElement('tbody');i++;
+   while(i+1<lines.length&&lines[i+1].trim().includes('|')&&lines[i+1].trim()){body.appendChild(row(lines[++i],false));}
+   table.appendChild(body);wrap.appendChild(table);root.appendChild(wrap);continue;
+  }
+  const heading=line.match(/^#{1,6}\s+(.+)$/);if(heading){list=null;const el=document.createElement('h4');aiInline(el,heading[1]);root.appendChild(el);continue;}
+  if(/^[-*_]{3,}$/.test(line)){list=null;root.appendChild(document.createElement('hr'));continue;}
+  const item=line.match(/^([-*]|\d+\.)\s+(.+)$/);if(item){const tag=/\d/.test(item[1])?'ol':'ul';if(!list||list.tagName.toLowerCase()!==tag){list=document.createElement(tag);root.appendChild(list);}const li=document.createElement('li');aiInline(li,item[2]);list.appendChild(li);continue;}
+  list=null;const el=document.createElement('p');aiInline(el,line);root.appendChild(el);
+ }
+}
