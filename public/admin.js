@@ -109,7 +109,7 @@ async function loadDashboard() {
 }
 async function boot() {
   const health = await FD.api('/api/health'); $('mode').textContent = `Server online · v${health.version} · ${health.mode === 'local-demo' ? 'Τοπική δοκιμή' : 'Πιλοτικό περιβάλλον'}`;
-  $('aiMode').textContent = health.aiConfigured ? 'Πραγματικό AI ενεργό' : 'Περιορισμένος οδηγός · χωρίς AI';
+  $('aiMode').textContent = health.aiConfigured ? 'GPT-OSS 120B · συνδεδεμένο' : 'Τοπικές αναφορές · αναμονή κλειδιού AI'; $('askAi').disabled=!health.aiConfigured; $('aiSetup').hidden=health.aiConfigured;
   $('storageWarning').textContent = health.storage === 'postgres' ? 'Η μόνιμη βάση PostgreSQL είναι συνδεδεμένη.' : 'ΠΡΟΣΟΧΗ: προσωρινή αποθήκευση. Τα στοιχεία μπορεί να χαθούν σε επανεκκίνηση ή νέο deployment.';
   const me = await FD.me('admin'); if (me.authenticated && me.role === 'admin') { $('login').classList.add('hidden'); $('dashboard').classList.remove('hidden'); await loadDashboard(); }
 }
@@ -118,7 +118,19 @@ $('refresh').addEventListener('click',()=>loadDashboard().catch(e=>FD.notice('se
 $('saveSettings').addEventListener('click',async()=>{try{const body={};for(const key of ['customerServiceFee','shopDeliveryFee','shopCommissionPercent','riderBaseAmount','riderPerKm','badWeatherBonus'])body[key]=Number($(key).value);await FD.api('/api/settings',{method:'PATCH',body:JSON.stringify(body)});FD.notice('settingsMsg','Οι ρυθμίσεις αποθηκεύτηκαν.');await loadDashboard();}catch(e){FD.notice('settingsMsg',e.message,true);}});
 $('resetShopCode').addEventListener('click',async()=>{if(!confirm('Ο προηγούμενος κωδικός καταστήματος θα ακυρωθεί. Συνέχεια;'))return;try{const result=await FD.api('/api/admin/shop-code',{method:'POST',body:'{}'});FD.notice('shopCodeNotice',`ΝΕΟΣ ΚΩΔΙΚΟΣ ΚΑΤΑΣΤΗΜΑΤΟΣ (εμφανίζεται μόνο τώρα):\n${result.accessCode}\n\nΑποθήκευσέ τον σε ασφαλές μέρος. ${result.warning || ''}`);}catch(e){FD.notice('shopCodeNotice',e.message,true);}});
 $('logout').addEventListener('click',async()=>{await FD.logout('admin');location.reload();});
-$('askAi').addEventListener('click',async()=>{const message=$('question').value.trim();if(!message)return;appendBubble('me',message);$('question').value='';$('askAi').disabled=true;FD.notice('aiMsg','Ο βοηθός επεξεργάζεται την ερώτηση…');try{const r=await FD.api('/api/assistant',{method:'POST',body:JSON.stringify({message,history:chatHistory})});appendBubble('assistant',r.answer);chatHistory.push({role:'user',content:message},{role:'assistant',content:r.answer});chatHistory=chatHistory.slice(-8);FD.notice('aiMsg',r.mode==='guide'?'Απάντηση από τον βασικό οδηγό, όχι από μοντέλο AI.':'');}catch(e){FD.notice('aiMsg',e.message,true);}finally{$('askAi').disabled=false;}});
+$('askAi').addEventListener('click',async()=>{
+  const message=$('question').value.trim();if(!message)return;
+  if(!$('externalAiConsent').checked){FD.notice('aiMsg','Επιβεβαίωσε ότι η ερώτηση δεν έχει προσωπικά ή εμπιστευτικά στοιχεία.',true);return;}
+  appendBubble('me',message);$('question').value='';$('askAi').disabled=true;FD.notice('aiMsg','Το GPT-OSS 120B επεξεργάζεται την ερώτηση…');
+  try{const r=await FD.api('/api/assistant',{method:'POST',body:JSON.stringify({message,externalConfirmed:true})});appendBubble('assistant',r.answer);FD.notice('aiMsg','Απάντηση AI · μπορεί να περιέχει λάθη.');}
+  catch(e){FD.notice('aiMsg',e.message,true);}finally{$('askAi').disabled=false;}
+});
+document.querySelectorAll('[data-local-report]').forEach(button=>button.onclick=async()=>{
+  button.disabled=true;appendBubble('me',button.textContent.trim());
+  try{const r=await FD.api('/api/assistant',{method:'POST',body:JSON.stringify({report:button.dataset.localReport})});appendBubble('assistant',r.answer);FD.notice('aiMsg','Τοπική αναφορά από τα δεδομένα του Fair Delivery.');}catch(e){FD.notice('aiMsg',e.message,true);}finally{button.disabled=false;}
+});
+$('clearAiChat').onclick=()=>{$('chatLog').replaceChildren();appendBubble('assistant','Τι θέλεις να δούμε;');FD.notice('aiMsg','');};
+
 function appendBubble(role,text){const node=document.createElement('div');node.className='bubble'+(role==='me'?' me':'');node.textContent=text;$('chatLog').appendChild(node);$('chatLog').scrollTop=$('chatLog').scrollHeight;}
 $('reloadCourierApplications').addEventListener('click',()=>loadCourierApplications().catch(e=>FD.notice('courierApplicationNotice',e.message,true)));
 boot().catch(e=>{$('mode').textContent='Σφάλμα σύνδεσης: '+e.message;});
