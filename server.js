@@ -393,7 +393,7 @@ async function handleApi(req, res, url) {
     state.courierApplications = pruneApplications(state.courierApplications);
     if (state.courierApplications.length >= 300)
       return sendJson(res, 503, { error: 'Οι θέσεις του πιλοτικού μητρώου αιτήσεων έχουν συμπληρωθεί προσωρινά.' });
-    const duplicate = state.courierApplications.some(app => app.email === candidate.email &&
+    const duplicate = state.courierApplications.some(app => app.kind !== 'interest' && app.email === candidate.email &&
        Date.now() - Date.parse(app.createdAt) < 24 * 60 * 60_000);
     if (duplicate) return sendJson(res, 202, { received: true, screening: evaluateApplication(candidate),
        message: 'Η αίτηση παραλήφθηκε. Θα επικοινωνήσουμε μαζί σου για τυχόν επόμενα βήματα.' });
