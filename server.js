@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
+const {paymentDetails,shopHold}=require('./shop-controls');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
 const { validateApplication, evaluateApplication, pruneApplications } = require('./courier-onboarding');
 
@@ -70,7 +71,10 @@ function normalizeState(parsed = {}) {
     shopCredential: parsed.shopCredential || null,
     courierApplications: pruneApplications(parsed.courierApplications),
     customers: parsed.customers && typeof parsed.customers === 'object' && !Array.isArray(parsed.customers) ? parsed.customers : {},
-    shopSettlements: Array.isArray(parsed.shopSettlements) ? parsed.shopSettlements : []
+    shopSettlements: Array.isArray(parsed.shopSettlements) ? parsed.shopSettlements : [],
+    shopPayout: parsed.shopPayout || null,
+    shopHolds: parsed.shopHolds || {},
+    shopHoldHistory: Array.isArray(parsed.shopHoldHistory)?parsed.shopHoldHistory:[]
   };
 }
 
@@ -539,7 +543,7 @@ async function handleApi(req, res, url) {
   }
 
   if (method === 'GET' && pathname === '/api/config') {
-    return sendJson(res, 200, { settings: state.settings, storeLocation: state.settings.storeLocation || null, demoMode: DEMO_MODE });
+    return sendJson(res, 200, { settings: state.settings, storeLocation: state.settings.storeLocation || null, demoMode: DEMO_MODE, acceptingOrders: !state.shopHolds.default?.suspended });
   }
 
   if (method === 'GET' && pathname === '/api/products') {
@@ -633,6 +637,7 @@ async function handleApi(req, res, url) {
       estimatedKm: null, badWeather: false, riderPayEstimate: null,
       assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
     };
+    if(state.shopHolds.default?.suspended) return sendJson(res,409,{error:'Το κατάστημα δεν δέχεται προσωρινά νέες παραγγελίες.'});
     state.orders.push(order); await persistState();
     return sendJson(res, 201, { order: publicOrder(order), trackingUrl: `/app/customer/?order=${encodeURIComponent(order.id)}` });
   }
@@ -708,7 +713,29 @@ async function handleApi(req, res, url) {
 
   if(method==='GET' && pathname==='/api/shop/billing'){
     const session=requireRole(req,res,['shop','admin']);if(!session)return;
-    return sendJson(res,200,settlementSummary(state.orders,state.shopSettlements,session.storeId||'default'));
+    const storeId=session.storeId||'default';
+    return sendJson(res,200,{...settlementSummary(state.orders,state.shopSettlements,storeId),payout:state.shopPayout,hold:state.shopHolds[storeId]||{suspended:false},holdHistory:state.shopHoldHistory.filter(x=>x.storeId===storeId).slice(-30)});
+  }
+  if(method==='PATCH' && ['/api/admin/shop-payout','/api/admin/shop-hold'].includes(pathname)){
+    const session=requireRole(req,res,['admin']);if(!session)return;
+    const origin=req.headers.origin;
+    if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    if(!rateLimit(authWindows,'shop-controls:'+clientIp(req),15,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες.'});
+    const body=await readJson(req,4096);
+    if(!roleCode('admin')||!safeEqual(String(body.adminCode||''),roleCode('admin')))return sendJson(res,403,{error:'Απαιτείται επιβεβαίωση με τον κωδικό Admin.'});
+    const storeId=session.storeId||'default';
+    if(pathname.endsWith('shop-payout')){
+      let payout;
+      try{payout=paymentDetails(body);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
+      const old=state.shopPayout;state.shopPayout=payout;
+      try{await persistState();}catch(e){state.shopPayout=old;throw e;}
+      return sendJson(res,200,{payout});
+    }
+    const old=state.shopHolds[storeId];let hold;
+    try{hold=shopHold(body,old,settlementSummary(state.orders,state.shopSettlements,storeId));}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
+    const entry={...hold,storeId,id:crypto.randomUUID()};state.shopHolds[storeId]=hold;state.shopHoldHistory.push(entry);
+    try{await persistState();}catch(e){if(old)state.shopHolds[storeId]=old;else delete state.shopHolds[storeId];state.shopHoldHistory=state.shopHoldHistory.filter(x=>x.id!==entry.id);throw e;}
+    return sendJson(res,200,{hold});
   }
   if(method==='POST' && pathname==='/api/admin/shop-settlements'){
     const session=requireRole(req,res,['admin']);if(!session)return;

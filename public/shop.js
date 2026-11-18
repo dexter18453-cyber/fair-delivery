@@ -62,6 +62,8 @@ function drawShopMap(orders, drivers, storeLocation) {
 async function loadOrders() {
   const [r, driverResponse, config, billing] = await Promise.all([FD.api('/api/orders'), FD.api('/api/shop/riders'), FD.api('/api/config'), FD.api('/api/shop/billing')]);
   $('shopBillingOutstanding').textContent=FD.money(billing.outstandingCents/100);
+  $('shopPayoutInfo').textContent=billing.payout?(billing.payout.beneficiary+' · '+(billing.payout.iban?'IBAN: '+billing.payout.iban:'')+(billing.payout.irisPhone?' · IRIS: '+billing.payout.irisPhone:'')):'Δεν έχουν οριστεί στοιχεία εξόφλησης.';
+  FD.notice('shopHoldNotice',billing.hold.suspended?'Αναστολή νέων παραγγελιών: '+billing.hold.reason+' · Επικοινώνησε με τον διαχειριστή για διευκρινίσεις ή εξόφληση.':'',billing.hold.suspended);
   $('shopBillingDays').innerHTML=billing.days.map(d=>`<article class="order"><b>${FD.esc(d.day)}</b><p class="hint">${d.completed} ολοκληρωμένες · Σύνολο ${FD.money(d.feeCents/100)} · Εξοφλήσεις ${FD.money(d.settledCents/100)}</p><b>Εκκρεμούν ${FD.money(d.outstandingCents/100)}</b></article>`).join('')||'<p class="hint">Δεν υπάρχουν οφειλές στο νέο μοντέλο.</p>';
   currentDrivers = driverResponse.riders;
   renderDrivers(currentDrivers);

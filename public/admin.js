@@ -53,6 +53,14 @@ async function loadCourierApplications(){
 async function loadBilling(){
   const data=await FD.api('/api/shop/billing');
   $('billingOutstanding').textContent=FD.money(data.outstandingCents/100);
+  $('payoutBeneficiary').value=data.payout?.beneficiary||'';
+  $('payoutIban').value=data.payout?.iban||'';
+  $('payoutPhone').value=data.payout?.irisPhone||'';
+  $('payoutIrisConfirmed').checked=false;
+  $('holdStatus').textContent=data.hold.suspended?'Σε αναμονή: '+data.hold.reason:'Ενεργό — δέχεται παραγγελίες';
+  $('holdSuspend').disabled=data.hold.suspended||!data.outstandingCents;
+  $('holdResume').disabled=!data.hold.suspended;
+  $('holdHistory').innerHTML=data.holdHistory.slice().reverse().map(h=>`<p class="hint">${FD.esc(new Date(h.changedAt).toLocaleString('el-GR'))} · ${h.suspended?'Αναστολή':'Επανενεργοποίηση'} · ${FD.esc(h.reason)}</p>`).join('');
   $('billingDays').innerHTML=data.days.map(d=>`<article class="order"><b>${FD.esc(d.day)}</b><p class="hint">${d.completed} ολοκληρωμένες · Σύνολο ${FD.money(d.feeCents/100)} · Καταχωρισμένες εξοφλήσεις ${FD.money(d.settledCents/100)}</p><b>Εκκρεμούν ${FD.money(d.outstandingCents/100)}</b>${d.outstandingCents?`<div class="actions"><button type="button" data-bill-day="${FD.esc(d.day)}" data-bill-cents="${d.outstandingCents}">Καταχώριση δοκιμαστικής εξόφλησης</button></div>`:''}</article>`).join('')||'<p class="hint">Καμία ολοκληρωμένη παραγγελία στο νέο μοντέλο.</p>';
   $('billingHistory').innerHTML=data.history.map(x=>`<div class="product"><div><b>${FD.esc(x.day)} · ${FD.money(x.amountCents/100)}</b><p class="hint">Δοκιμαστική καταχώριση · ${new Date(x.recordedAt).toLocaleString('el-GR')}</p></div></div>`).join('')||'<p class="hint">Καμία καταχώριση ακόμα.</p>';
   document.querySelectorAll('[data-bill-day]').forEach(b=>b.onclick=async()=>{
@@ -64,6 +72,15 @@ async function loadBilling(){
   });
 }
 $('billingRefresh').onclick=()=>loadBilling().catch(e=>FD.notice('billingNotice',e.message,true));
+async function changeShopControl(path,body){
+  const adminCode=prompt('Επιβεβαίωσε με τον κωδικό Admin.');
+  if(!adminCode)return;
+  try{await FD.api('/api/admin/'+path,{method:'PATCH',body:JSON.stringify({...body,adminCode})});FD.notice('billingNotice','Η αλλαγή αποθηκεύτηκε.');await loadBilling();}
+  catch(e){FD.notice('billingNotice',e.message,true);}
+}
+$('payoutSave').onclick=()=>changeShopControl('shop-payout',{beneficiary:$('payoutBeneficiary').value,iban:$('payoutIban').value,irisPhone:$('payoutPhone').value,irisBusinessConfirmed:$('payoutIrisConfirmed').checked});
+$('holdSuspend').onclick=()=>changeShopControl('shop-hold',{suspended:true,reason:$('holdReason').value,noticeConfirmed:$('holdNoticeConfirmed').checked});
+$('holdResume').onclick=()=>changeShopControl('shop-hold',{suspended:false,reason:$('holdReason').value,correctionConfirmed:$('holdCorrection').checked});
 
 async function loadDashboard() {
   await loadBilling();

@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let products = []; let cart = new Map(); let currentOrderId = null; let trackingTimer = null;
-let serviceFee = 0; let deliveryFee = 0; let submitting = false;
+let serviceFee = 0; let deliveryFee = 0; let submitting = false; let acceptingOrders=true;
 let deliveryMap = null; let deliveryMarker = null; let trackingMap = null; let trackingLayers = [];
 const DEFAULT_CENTER = [37.97, 23.67];
 function renderCart() {
@@ -14,7 +14,7 @@ function renderCart() {
   $('serviceFee').textContent = FD.money(rows.length ? serviceFee : 0);
   $('deliveryFee').textContent = FD.money(rows.length ? deliveryFee : 0);
   $('total').textContent = FD.money(rows.length ? subtotal + serviceFee + deliveryFee : 0);
-  $('placeOrder').disabled = submitting || !rows.length;
+  $('placeOrder').disabled = submitting || !rows.length || !acceptingOrders;
   document.querySelectorAll('[data-plus]').forEach(b => b.onclick = () => changeQty(b.dataset.plus, 1));
   document.querySelectorAll('[data-minus]').forEach(b => b.onclick = () => changeQty(b.dataset.minus, -1));
 }
@@ -51,6 +51,8 @@ function renderFilteredProducts() {
 }
 async function loadProducts() {
   const [menu, config] = await Promise.all([FD.api('/api/products'), FD.api('/api/config')]); products = menu.products;
+  acceptingOrders=config.acceptingOrders!==false;
+  if(!acceptingOrders)FD.notice('shopUnavailable','Το κατάστημα δεν δέχεται προσωρινά νέες παραγγελίες.',true);
   serviceFee = Number(config.settings.customerServiceFee);
   deliveryFee = Number(config.settings.shopDeliveryFee || 0);
   const categories=['Όλα',...new Set(products.map(p=>p.category||'Μενού'))];
