@@ -32,6 +32,17 @@
     catch(e){message(e.message,true);}finally{busy=false;}
   }
   $('accountRegister').onclick=()=>auth('register');$('accountLogin').onclick=()=>auth('login');
+  async function securityAction(action,body){
+    if(busy)return;busy=true;message('');FD.notice('recoveryResult','');
+    try{
+      const result=await FD.api('/api/customer/'+action,{method:'POST',body:JSON.stringify(body)});
+      if(result.recoveryCode){FD.notice('recoveryResult','Φύλαξε τώρα τον κωδικό, δεν εμφανίζεται ξανά: '+result.recoveryCode);message('Ο κωδικός ανάκτησης δημιουργήθηκε.');}
+      else{account=null;display();message('Ο κωδικός άλλαξε. Συνδέσου ξανά με τον νέο κωδικό.');}
+    }catch(e){message(e.message,true);}finally{busy=false;for(const id of ['securityPassword','securityNewPassword','recoverCode','recoverPassword'])$(id).value='';}
+  }
+  $('generateRecovery').onclick=()=>{if(confirm('Ο προηγούμενος κωδικός ανάκτησης θα ακυρωθεί. Συνέχεια;'))securityAction('recovery-code',{password:$('securityPassword').value});};
+  $('changePassword').onclick=()=>securityAction('change-password',{password:$('securityPassword').value,newPassword:$('securityNewPassword').value});
+  $('accountRecover').onclick=()=>securityAction('recover',{alias:$('accountAlias').value,recoveryCode:$('recoverCode').value.trim(),newPassword:$('recoverPassword').value});
   $('accountLogout').onclick=async()=>{try{await FD.api('/api/customer/logout',{method:'POST'});location.href=location.pathname+'#account';location.reload();}catch(e){message(e.message,true);}};
   $('accountDelete').onclick=async()=>{if(!confirm('Να διαγραφεί ο δοκιμαστικός λογαριασμός;'))return;try{await FD.api('/api/customer/account',{method:'DELETE',body:JSON.stringify({password:$('accountDeletePassword').value,confirmDelete:true})});location.href=location.pathname+'#account';location.reload();}catch(e){message(e.message,true);}};
   $('accountRefresh').onclick=()=>refreshOrders().catch(e=>message(e.message,true));

@@ -10,6 +10,10 @@ const { storeId:validStoreId, allStores, getStore, publicStore, newStore }=requi
 const storeOperations=require('./store-operations');
 const checkoutReliability=require('./checkout-reliability');
 const checkoutPending=new Map();
+const accountRecovery=require('./account-recovery');
+const encryptedBackup=require('./encrypted-backup');
+const credentialChanges=new Set();
+let backupBusy=false;
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
 const {paymentDetails,shopHold,initialPayout,visiblePayout}=require('./shop-controls');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
@@ -483,7 +487,7 @@ async function handleApi(req, res, url) {
       await persistState();
     } else {
       const hash=await riderCodeHash(input.password,account?.salt || 'fd-dummy-login-salt');
-      if (!account || !safeEqual(hash,account.passwordHash)) return sendJson(res,401,{error:'Λάθος όνομα ή κωδικός.'});
+      if (!account || state.customers[account.id]!==account || credentialChanges.has(account.id) || !safeEqual(hash,account.passwordHash)) return sendJson(res,401,{error:'Λάθος όνομα ή κωδικός.'});
     }
     const prior=getSession(req,'customer');
     if(prior) sessions.delete(prior.token);
@@ -491,6 +495,44 @@ async function handleApi(req, res, url) {
     sessions.set(token,{role:'customer',userId:account.id,expiresAt:Date.now()+SESSION_TTL_MS});
     const secure=process.env.NODE_ENV==='production'||process.env.RENDER?'; Secure':'';
     return sendJson(res,200,{account:publicAccount(account)},{'Set-Cookie':`fd_customer_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS/1000}${secure}`});
+  }
+  if(method==='POST'&&['/api/customer/recovery-code','/api/customer/recover','/api/customer/change-password'].includes(pathname)){
+    const origin=req.headers.origin;
+    if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    if(!rateLimit(authWindows,'customer-recovery:'+clientIp(req),8,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες. Δοκίμασε αργότερα.'});
+    const body=await readJson(req,2048);const recover=pathname.endsWith('/recover'),generate=pathname.endsWith('/recovery-code');
+    let account,session,input;
+    if(recover){
+      try{input=customerCredentials({alias:body.alias,password:body.newPassword});}catch(e){return sendJson(res,400,{error:e.message});}
+      account=Object.values(state.customers).find(a=>a.alias===input.alias);
+      const hash=accountRecovery.recoveryHash(body.recoveryCode);
+      if(!account||!hash||!safeEqual(hash,account.recoveryHash))return sendJson(res,401,{error:'Μη έγκυρα στοιχεία ανάκτησης.'});
+    }else{
+      session=requireRole(req,res,['customer']);if(!session)return;
+      account=state.customers[session.userId];
+      if(!account)return sendJson(res,401,{error:'Λογαριασμός μη διαθέσιμος.'});
+      try{customerCredentials({alias:account.alias,password:body.password});if(!generate)input=customerCredentials({alias:account.alias,password:body.newPassword});}catch(e){return sendJson(res,400,{error:e.message});}
+    }
+    if(credentialChanges.has(account.id))return sendJson(res,409,{error:'Εκκρεμεί αλλαγή λογαριασμού.'});
+    credentialChanges.add(account.id);
+    try{
+      if(!recover&&!safeEqual(await riderCodeHash(body.password,account.salt),account.passwordHash))return sendJson(res,401,{error:'Λάθος κωδικός.'});
+      if(state.customers[account.id]!==account)return sendJson(res,401,{error:'Λογαριασμός μη διαθέσιμος.'});
+      if(recover&&!safeEqual(accountRecovery.recoveryHash(body.recoveryCode),account.recoveryHash))return sendJson(res,401,{error:'Μη έγκυρα στοιχεία ανάκτησης.'});
+      if(generate){
+        const recovery=accountRecovery.newRecovery();const previous=account.recoveryHash;
+        account.recoveryHash=recovery.hash;
+        try{await persistState();}catch(e){if(previous)account.recoveryHash=previous;else delete account.recoveryHash;throw e;}
+        return sendJson(res,200,{recoveryCode:recovery.code});
+      }
+      const salt=crypto.randomBytes(16).toString('hex');const passwordHash=await riderCodeHash(input.password,salt);
+      if(state.customers[account.id]!==account)return sendJson(res,401,{error:'Λογαριασμός μη διαθέσιμος.'});
+      const previous={salt:account.salt,passwordHash:account.passwordHash,recoveryHash:account.recoveryHash};
+      account.salt=salt;account.passwordHash=passwordHash;delete account.recoveryHash;
+      try{await persistState();}catch(e){Object.assign(account,previous);throw e;}
+      for(const [token,old] of sessions)if(old.role==='customer'&&old.userId===account.id)sessions.delete(token);
+      return sendJson(res,200,{changed:true},{'Set-Cookie':'fd_customer_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'});
+    }finally{credentialChanges.delete(account.id);}
   }
   if (method === 'POST' && pathname === '/api/customer/logout') {
     const customer=getSession(req,'customer');
@@ -501,10 +543,12 @@ async function handleApi(req, res, url) {
     const session=requireRole(req,res,['customer']); if(!session)return;
     const account=state.customers[session.userId];
     if(!account)return sendJson(res,404,{error:'Δεν υπάρχει λογαριασμός.'});
+    if(credentialChanges.has(account.id))return sendJson(res,409,{error:'Εκκρεμεί αλλαγή λογαριασμού.'});
     const body=await readJson(req,2048);
     if(body.confirmDelete!==true||typeof body.password!=='string'||body.password.length>128)return sendJson(res,400,{error:'Χρειάζεται επιβεβαίωση και κωδικός.'});
     if(!rateLimit(authWindows,'customer-delete:'+clientIp(req),6,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες.'});
     if(!safeEqual(await riderCodeHash(body.password,account.salt),account.passwordHash))return sendJson(res,401,{error:'Λάθος κωδικός.'});
+    if(credentialChanges.has(account.id)||state.customers[account.id]!==account)return sendJson(res,409,{error:'Εκκρεμεί αλλαγή λογαριασμού.'});
     delete state.customers[account.id];
     for(const [token,old] of sessions)if(old.role==='customer'&&old.userId===account.id)sessions.delete(token);
     for(const order of state.orders)if(order.customerId===account.id){delete order.customerId;order.trackingPrivate=true;}
@@ -839,6 +883,25 @@ async function handleApi(req, res, url) {
     state.shopSettlements.push(entry);
     try{await persistState();}catch(error){state.shopSettlements=state.shopSettlements.filter(x=>x.id!==entry.id);throw error;}
     return sendJson(res,201,{settlement:entry,...settlementSummary(state.orders,state.shopSettlements,storeId)});
+  }
+
+  if(method==='POST'&&pathname==='/api/admin/backup'){
+    const session=requireRole(req,res,['admin']);if(!session)return;
+    const origin=req.headers.origin;
+    if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    if(!rateLimit(authWindows,'backup:'+clientIp(req),4,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες.'});
+    const body=await readJson(req,4096);
+    if(!safeEqual(String(body.adminCode||''),roleCode('admin')))return sendJson(res,403,{error:'Χρειάζεται ο κωδικός Admin.'});
+    if(body.confirm!==true||!encryptedBackup.validPhrase(body.passphrase))return sendJson(res,400,{error:'Επιβεβαίωσε την εξαγωγή και φράση κρυπτογράφησης 20–256 χαρακτήρων.'});
+    if(backupBusy)return sendJson(res,409,{error:'Εκκρεμεί άλλη εξαγωγή.'});
+    backupBusy=true;
+    try{
+      await writeQueue;
+      const snapshot=postgresPool?(await postgresPool.query('SELECT body FROM fair_delivery_state WHERE id=1')).rows[0]?.body:JSON.parse(await fs.promises.readFile(STATE_FILE,'utf8'));
+      if(!snapshot||typeof snapshot!=='object')return sendJson(res,503,{error:'Δεν βρέθηκε αποθηκευμένο αντίγραφο.'});
+      const envelope=await encryptedBackup.encryptBackup(snapshot,body.passphrase);
+      return sendJson(res,200,envelope);
+    }catch(e){return sendJson(res,503,{error:'Η κρυπτογραφημένη εξαγωγή δεν ολοκληρώθηκε.'});}finally{backupBusy=false;}
   }
 
   if (method === 'GET' && pathname === '/api/stats') {

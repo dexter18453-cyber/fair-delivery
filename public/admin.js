@@ -132,6 +132,19 @@ document.querySelectorAll('[data-local-report]').forEach(button=>button.onclick=
 $('clearAiChat').onclick=()=>{$('chatLog').replaceChildren();appendBubble('assistant','Τι θέλεις να δούμε;');FD.notice('aiMsg','');};
 
 function appendBubble(role,text,formatted=false){const node=document.createElement('div');node.className='bubble'+(role==='me'?' me':'');if(formatted){node.classList.add('ai-formatted');renderAiText(node,text);}else node.textContent=text;$('chatLog').appendChild(node);$('chatLog').scrollTop=$('chatLog').scrollHeight;}
+$('backupDownload').onclick=async()=>{
+ const button=$('backupDownload'),passphrase=$('backupPhrase').value;
+ if(passphrase.length<20||passphrase!==$('backupRepeat').value){FD.notice('backupNotice','Η φράση πρέπει να έχει τουλάχιστον 20 χαρακτήρες και να συμφωνεί με την επανάληψη.',true);return;}
+ if(!confirm('Το κρυπτογραφημένο αρχείο περιλαμβάνει το αποθηκευμένο μητρώο. Θα το φυλάξεις ιδιωτικά;'))return;
+ button.disabled=true;FD.notice('backupNotice','Δημιουργία κρυπτογραφημένου αντιγράφου…');
+ try{
+ const envelope=await FD.api('/api/admin/backup',{method:'POST',body:JSON.stringify({adminCode:$('backupAdminCode').value,passphrase,confirm:true})});
+ const blob=new Blob([JSON.stringify(envelope)],{type:'application/json'}),url=URL.createObjectURL(blob),link=document.createElement('a');
+ link.href=url;link.download='fair-delivery-backup-'+new Date().toISOString().slice(0,10)+'.encrypted.json';document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+ FD.notice('backupNotice','Το αντίγραφο δημιουργήθηκε. Έλεγξε ότι αποθηκεύτηκε στη συσκευή σου.');
+ }catch(e){FD.notice('backupNotice',e.message,true);}
+ finally{button.disabled=false;for(const id of ['backupPhrase','backupRepeat','backupAdminCode'])$(id).value='';}
+};
 $('reloadCourierApplications').addEventListener('click',()=>loadCourierApplications().catch(e=>FD.notice('courierApplicationNotice',e.message,true)));
 boot().catch(e=>{$('mode').textContent='Σφάλμα σύνδεσης: '+e.message;});
 
