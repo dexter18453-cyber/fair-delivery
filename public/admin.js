@@ -113,7 +113,31 @@ async function boot() {
   $('storageWarning').textContent = health.storage === 'postgres' ? 'Η μόνιμη βάση PostgreSQL είναι συνδεδεμένη.' : 'ΠΡΟΣΟΧΗ: προσωρινή αποθήκευση. Τα στοιχεία μπορεί να χαθούν σε επανεκκίνηση ή νέο deployment.';
   const me = await FD.me('admin'); if (me.authenticated && me.role === 'admin') { $('login').classList.add('hidden'); $('dashboard').classList.remove('hidden'); await loadDashboard(); }
 }
-$('loginBtn').addEventListener('click', async()=>{ try { await FD.login('admin',$('code').value); $('login').classList.add('hidden'); $('dashboard').classList.remove('hidden'); await loadDashboard(); } catch(e){FD.notice('loginMsg',e.message,true);} });
+$('adminLoginForm').addEventListener('submit',async event=>{
+  event.preventDefault();const button=$('loginBtn');button.disabled=true;
+  try{
+    await FD.login('admin',$('code').value,{email:$('adminEmail').value.trim()});
+    $('code').value='';
+    FD.notice('loginMsg','');
+    $('login').classList.add('hidden');$('dashboard').classList.remove('hidden');
+    await loadDashboard();
+  }catch(e){FD.notice('loginMsg',e.message,true);}
+  finally{button.disabled=false;}
+});
+$('adminChangePassword').addEventListener('click',async()=>{
+  const currentCode=$('adminCurrentCode').value,newCode=$('adminNewCode').value,again=$('adminNewCodeAgain').value;
+  if(newCode.length<12||newCode!==again){FD.notice('adminPasswordNotice','Ο νέος κωδικός πρέπει να έχει τουλάχιστον 12 χαρακτήρες και να ταιριάζει με την επανάληψη.',true);return;}
+  if(!confirm('Η αλλαγή θα αποσυνδέσει όλες τις συσκευές σου. Θέλεις να συνεχίσεις;'))return;
+  const button=$('adminChangePassword');button.disabled=true;
+  try{
+    await FD.api('/api/admin/change-password',{method:'POST',body:JSON.stringify({currentCode,newCode})});
+    for(const id of ['adminCurrentCode','adminNewCode','adminNewCodeAgain'])$(id).value='';
+    alert('Ο προσωπικός κωδικός άλλαξε. Θα συνδεθείς ξανά με το email σου και τον νέο κωδικό.');
+    location.href='/app/admin/';
+    location.reload();
+  }catch(e){FD.notice('adminPasswordNotice',e.message,true);}
+  finally{button.disabled=false;}
+});
 $('refresh').addEventListener('click',()=>loadDashboard().catch(e=>FD.notice('settingsMsg',e.message,true)));
 $('saveSettings').addEventListener('click',async()=>{try{const body={};for(const key of ['customerServiceFee','shopDeliveryFee','shopCommissionPercent','riderBaseAmount','riderPerKm','badWeatherBonus'])body[key]=Number($(key).value);await FD.api('/api/settings',{method:'PATCH',body:JSON.stringify(body)});FD.notice('settingsMsg','Οι ρυθμίσεις αποθηκεύτηκαν.');await loadDashboard();}catch(e){FD.notice('settingsMsg',e.message,true);}});
 $('resetShopCode').addEventListener('click',async()=>{if(!confirm('Ο προηγούμενος κωδικός καταστήματος θα ακυρωθεί. Συνέχεια;'))return;try{const result=await FD.api('/api/admin/shop-code',{method:'POST',body:'{}'});FD.notice('shopCodeNotice',`ΝΕΟΣ ΚΩΔΙΚΟΣ ΚΑΤΑΣΤΗΜΑΤΟΣ (εμφανίζεται μόνο τώρα):\n${result.accessCode}\n\nΑποθήκευσέ τον σε ασφαλές μέρος. ${result.warning || ''}`);}catch(e){FD.notice('shopCodeNotice',e.message,true);}});
