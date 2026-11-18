@@ -106,3 +106,79 @@ body[data-app-role="admin"] [data-view="applications"] .driver-row{display:block
 .candidate-card{border:1px solid #354054;border-radius:14px;background:#101827;padding:15px;margin:13px 0}
 .candidate-card h3{font-size:16px;margin:0 0 6px}.candidate-contact{color:#c7d3e3;word-break:break-word}.candidate-issues{font-size:12px;color:#f4bfad;margin:8px 0 13px;padding-left:22px}.candidate-card .field{margin:10px 0}.candidate-card select,.candidate-card textarea{width:100%}.candidate-card .actions{display:flex;gap:8px;flex-wrap:wrap}.candidate-card .actions button{flex:1;min-width:130px}.candidate-card .warning{color:#ffbfad}
 @media(max-width:400px){body[data-app-role="admin"] .app-tabs .app-tab{font-size:9px;padding:4px 1px}.candidate-card{padding:12px}}
+
+/* Shared identity for the storefront and the three working dashboards. */
+body[data-app-role] {
+  --coral: #ff8069;
+  --ink: #171514;
+  --line: #393a3b;
+  --muted: #b8b5b2;
+  color: #faf5ef;
+  background: #121415;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+body[data-app-role] .brand-mark {
+  background: var(--coral);
+  color: var(--ink);
+  border-radius: 14px 14px 14px 4px;
+  box-shadow: none;
+  font: italic 900 29px/1 Arial, sans-serif;
+  letter-spacing: -3px;
+  padding-right: 3px;
+}
+body[data-app-role] .top {gap: 10px; flex-wrap: wrap}
+body[data-app-role] .top .brand {min-width: 0}
+body[data-app-role] .top .install-action {margin-left: auto; min-height: 44px; font-size: 12px}
+body[data-app-role] .install-help:not(.hidden) {display: block; color: #ffcabd; margin: 8px 0 18px}
+body[data-app-role] .panel, body[data-app-role] .metric {background: #1d2021; border-color: var(--line)}
+body[data-app-role] .metric .value {font-variant-numeric: tabular-nums; color: #fff2df}
+body[data-app-role] .eyebrow, body[data-app-role] .price {color: #ffa18e}
+body[data-app-role] :is(input, textarea, select) {background: #151718; border-color: #474847; font-size: 16px}
+body[data-app-role] button:not(.secondary):not(.danger):not(.app-tab):not(.category-chip) {
+  color: var(--ink); background: var(--coral); box-shadow: none; min-height: 44px;
+}
+body[data-app-role] button.secondary {background: #292c2d; color: #fff2e8; border-color: #505151}
+body[data-app-role] :focus-visible {outline: 3px solid #ffc3ac; outline-offset: 3px}
+body[data-app-role] .login {
+  display: grid; grid-template-columns: 1fr 1fr; max-width: 850px; padding: 0;
+  overflow: hidden; margin: clamp(16px, 5vh, 55px) auto; border-radius: 24px;
+}
+body[data-app-role] .entry-art {background: #493b42 url('/assets/neighborhood.webp') 69% center / cover no-repeat}
+body[data-app-role="shop"] .entry-art {background-image: url('/assets/pita.webp'); background-position: 75% center}
+body[data-app-role] .entry-fields {min-width: 0; padding: clamp(22px, 4vw, 44px); align-self: center}
+body[data-app-role] .entry-fields h2 {font-size: clamp(23px, 3vw, 33px); letter-spacing: -.045em}
+body[data-app-role] .dashboard-intro {padding: 16px 0 18px; border-bottom: 1px solid var(--line)}
+body[data-app-role] .dashboard-intro h2 {font-size: clamp(26px, 4vw, 40px)}
+body[data-app-role] .dashboard-intro button {margin-top: 8px}
+body[data-app-role] .grid.customer-grid {display: block}
+body[data-app-role] .micro-hero, body[data-app-role] .apply-hero {
+  border: 0; border-radius: 16px; padding: clamp(20px, 5vw, 58px);
+  margin: 0 0 26px; background: #572531 linear-gradient(90deg, #201011e8, transparent) center / cover;
+}
+body[data-app-role] .micro-hero {
+  background-image: linear-gradient(90deg, #241015ed, #36152299 43%, transparent 79%), url('/assets/pita.webp');
+  background-position: center, center 54%; min-height: clamp(185px, 25vw, 305px);
+  display: flex; flex-direction: column; justify-content: center;
+}
+body[data-app-role] .micro-hero h2 {font-size: clamp(36px, 6vw, 76px); line-height: 1.02; color: #fff4de; letter-spacing: -.055em; margin: 0}
+body[data-app-role] .micro-hero p {margin-top: 14px; color: #ffded1; font-weight: 600}
+body[data-app-role] .apply-hero {
+  background-image: linear-gradient(90deg, #121617f5 0%, #171a1bdd 45%, #18191880 100%), url('/assets/neighborhood.webp');
+  background-position: center, center 50%;
+}
+body[data-app-role] .apply-hero p {max-width: 46ch; color: #eee7e0}
+body[data-app-role] .product-catalog {display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,285px),1fr)); gap: 12px}
+body[data-app-role] .product-catalog .product {background: #252728; border-color: #42403e}
+body[data-app-role] .product-emoji {flex-basis: 58px; height: 66px; font-size: 29px; background: #3b302e}
+body[data-app-role] .category-chip {background: #282b2c; color: #ece6e0; border-color: #48494a}
+body[data-app-role] .category-chip.selected {background: #ffc4ae; color: var(--ink); border-color: #ffc4ae}
+body[data-app-role] .app-tabs {background: #1d2021f5; border-color: #424242}
+body[data-app-role] .app-tabs .app-tab {color: #c6c2bd}
+body[data-app-role] .app-tabs .app-tab.active {background: #50332e; color: #ffb39e}
+@media (max-width: 660px) {
+  body[data-app-role] .login {grid-template-columns: minmax(0,1fr); margin: 16px auto}
+  body[data-app-role] .entry-art {height: clamp(110px, 34vw, 185px); background-position: center 51%}
+  body[data-app-role] .top .brand .hint {max-width: 155px}
+  body[data-app-role] .app-tabs {gap: 1px; padding-inline: 4px}
+  body[data-app-role] .app-tabs .app-tab {min-width: 0}
+}

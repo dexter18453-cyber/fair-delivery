@@ -1477,8 +1477,8 @@ async function serveRoleApp(req, res, url) {
   return true;
 }
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
-const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js', 'courier-interest.js', 'courier-qualification.html', 'customer-account.js']);
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.webp': 'image/webp' };
+const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/pita.webp', 'assets/neighborhood.webp', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js', 'courier-interest.js', 'courier-qualification.html', 'customer-account.js']);
 async function serveStatic(req, res, url) {
   let requested = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
   if (!PUBLIC_FILES.has(requested)) return sendJson(res, 404, { error: 'Η σελίδα δεν βρέθηκε.' });
