@@ -20,7 +20,7 @@ test('admin email identity, session digest and nontrivial password constraints',
 test('admin remembers email login across deploy and revokes sessions on password change/logout', {timeout:40000},async()=>{
  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'fd-admin-login-')),port=42000+Math.floor(Math.random()*1200),base='http://127.0.0.1:'+port;
  const email='synthetic-admin@example.test';let child;
- const env={...process.env,RENDER:'',DATABASE_URL:'',FD_MIGRATION_TARGET_DATABASE_URL:'',NODE_ENV:'test',DEMO_MODE:'true',FD_ADMIN_LOGIN_EMAIL:email,PORT:String(port),HOST:'127.0.0.1',DATA_DIR:temp,FD_MAINTENANCE_MODE:'false'};
+ const env={...process.env,RENDER:'',DATABASE_URL:'',FD_MIGRATION_TARGET_DATABASE_URL:'',NODE_ENV:'test',DEMO_MODE:'',ADMIN_ACCESS_CODE:'demo',FD_ADMIN_LOGIN_EMAIL:email,PORT:String(port),HOST:'127.0.0.1',DATA_DIR:temp,FD_MAINTENANCE_MODE:'false'};
  async function launch(){
   child=spawn(process.execPath,['server.js'],{cwd:path.join(__dirname,'..'),env,stdio:'ignore'});
   for(let i=0;i<90;i++){try{const r=await fetch(base+'/api/health');if(r.ok)return;}catch{}await new Promise(r=>setTimeout(r,110));}
