@@ -8,6 +8,8 @@ const courierInterest=require('./courier-interest');
 const fairAssistant=require('./fair-assistant');
 const { storeId:validStoreId, allStores, getStore, publicStore, newStore }=require('./stores');
 const storeOperations=require('./store-operations');
+const checkoutReliability=require('./checkout-reliability');
+const checkoutPending=new Map();
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
 const {paymentDetails,shopHold,initialPayout,visiblePayout}=require('./shop-controls');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
@@ -203,7 +205,7 @@ courierRetentionTimer.unref();
 
 function persistState() {
   const snapshot = JSON.stringify(state, null, 2);
-  writeQueue = writeQueue.then(async () => {
+  writeQueue = writeQueue.catch(()=>{}).then(async () => {
     if (postgresPool) {
       await postgresPool.query('INSERT INTO fair_delivery_state (id, body) VALUES (1, $1::jsonb) ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body, updated_at = now()', [snapshot]);
       return;
@@ -669,9 +671,18 @@ async function handleApi(req, res, url) {
     if (!rateLimit(requestWindows, `orders:${ip}`, 10, 60_000)) return sendJson(res, 429, { error: 'Πολλές δοκιμαστικές παραγγελίες. Περίμενε ένα λεπτό.' });
     const body = await readJson(req, 12 * 1024);
     const id=validStoreId(body.storeId===undefined?'default':body.storeId);const store=id&&getStore(state,id);
-    if(!store||!store.active)return sendJson(res,404,{error:'Το κατάστημα δεν είναι διαθέσιμο.'});
     const customerSession = getSession(req, 'customer');
     const customerAccount = customerSession ? state.customers[customerSession.userId] : null;
+    let requestId,requestDigest;
+    try{requestId=checkoutReliability.requestKey(body,customerAccount);if(requestId)requestDigest=checkoutReliability.digest(body,id);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
+    const pendingKey=requestId?customerAccount.id+':'+requestId:null;
+    if(pendingKey){
+      const pending=checkoutPending.get(pendingKey);
+      if(pending){if(pending.digest!==requestDigest)return sendJson(res,409,{error:'Η προηγούμενη υποβολή έχει διαφορετικά στοιχεία.'});try{await pending.saved;}catch{return sendJson(res,503,{error:'Η προηγούμενη υποβολή δεν επιβεβαιώθηκε. Δοκίμασε ξανά.'});}}
+      const prior=state.orders.find(o=>o.customerId===customerAccount.id&&o.checkoutRequestId===requestId);
+      if(prior){if(prior.checkoutDigest!==requestDigest)return sendJson(res,409,{error:'Η προηγούμενη υποβολή έχει διαφορετικά στοιχεία.'});return sendJson(res,200,{order:publicOrder(prior),trackingUrl:'/app/customer/?order='+encodeURIComponent(prior.id),replayed:true});}
+    }
+    if(!store||!store.active)return sendJson(res,404,{error:'Το κατάστημα δεν είναι διαθέσιμο.'});
     if(store.id!=='default'&&!customerAccount)return sendJson(res,401,{error:'Συνδέσου στον δοκιμαστικό λογαριασμό σου.'});
     let payment;
     try { payment = checkoutPayment(body, customerAccount); } catch (error) { return sendJson(res, error.statusCode || 400, {error:error.message}); }
@@ -699,12 +710,13 @@ async function handleApi(req, res, url) {
       if (!product || !Number.isInteger(qty) || qty < 1 || qty > 20) return sendJson(res, 400, { error: 'Μη έγκυρο προϊόν ή ποσότητα.' });
       lines.push({ productId: product.id, name: product.name, unitPrice: product.price, qty, lineTotal: round2(product.price * qty) });
     }
+    try{checkoutReliability.checkUniqueItems(lines);if(requestId)checkoutReliability.verifyQuote(body,lines,store.settings.shopDeliveryFee||0);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
     const subtotal = round2(lines.reduce((sum, line) => sum + line.lineTotal, 0));
     let deliveryQuote;
     try{deliveryQuote=storeOperations.checkCheckout(state,store,{lat:deliveryLat,lng:deliveryLng},subtotal);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
     const order = {
       id: crypto.randomUUID(), storeId: store.id, items: lines, subtotal,
-      ...payment, ...deliveryQuote, customerId: customerAccount?.id || null, trackingPrivate: Boolean(customerAccount),
+      ...payment, ...deliveryQuote, ...(requestId?{checkoutRequestId:requestId,checkoutDigest:requestDigest}:{}),customerId: customerAccount?.id || null, trackingPrivate: Boolean(customerAccount),
       customerName, customerPhone, deliveryAddress,
       deliveryLocation: { lat: deliveryLat, lng: deliveryLng },
       serviceFee: 0, deliveryFee: round2(store.settings.shopDeliveryFee||0),
@@ -714,7 +726,9 @@ async function handleApi(req, res, url) {
       estimatedKm: null, badWeather: false, riderPayEstimate: null,
       assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
     };
-    state.orders.push(order); await persistState();
+    state.orders.push(order);
+    const saved=persistState();if(pendingKey)checkoutPending.set(pendingKey,{digest:requestDigest,saved});
+    try{await saved;}catch(e){state.orders=state.orders.filter(o=>o.id!==order.id);return sendJson(res,503,{error:'Η αποθήκευση δεν επιβεβαιώθηκε. Δοκίμασε ξανά.'});}finally{if(pendingKey)checkoutPending.delete(pendingKey);}
     return sendJson(res, 201, { order: publicOrder(order), trackingUrl: `/app/customer/?order=${encodeURIComponent(order.id)}` });
   }
 
