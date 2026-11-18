@@ -8,6 +8,8 @@ const COURIER_STATUS_LABELS={
 async function loadCourierApplications(){
   const data=await FD.api('/api/admin/courier-applications');
   const applications=data.applications||[];
+  if(appSeenIds===null)appSeenIds=new Set(applications.slice(0,50).map(a=>a.id));
+  renderApplicationBadge(applications.filter(a=>a.status==='new').length);
   const node=$('courierApplications');
   if(!node)return;
   node.innerHTML=applications.length?applications.map(app=>{
@@ -111,7 +113,7 @@ async function boot() {
   const health = await FD.api('/api/health'); $('mode').textContent = `Server online · v${health.version} · ${health.mode === 'local-demo' ? 'Τοπική δοκιμή' : 'Πιλοτικό περιβάλλον'}`;
   $('aiMode').textContent = health.aiConfigured ? 'GPT-OSS 120B · συνδεδεμένο' : 'Τοπικές αναφορές · αναμονή κλειδιού AI'; $('askAi').disabled=!health.aiConfigured; $('aiSetup').hidden=health.aiConfigured;
   $('storageWarning').textContent = health.storage === 'postgres' ? 'Η μόνιμη βάση PostgreSQL είναι συνδεδεμένη.' : 'ΠΡΟΣΟΧΗ: προσωρινή αποθήκευση. Τα στοιχεία μπορεί να χαθούν σε επανεκκίνηση ή νέο deployment.';
-  const me = await FD.me('admin'); if (me.authenticated && me.role === 'admin') { $('login').classList.add('hidden'); $('dashboard').classList.remove('hidden'); await loadDashboard(); }
+  const me = await FD.me('admin'); if (me.authenticated && me.role === 'admin') { $('login').classList.add('hidden'); $('dashboard').classList.remove('hidden'); await loadDashboard(); startApplicationMonitoring(); }
 }
 $('adminLoginForm').addEventListener('submit',async event=>{
   event.preventDefault();const button=$('loginBtn');button.disabled=true;
@@ -120,7 +122,7 @@ $('adminLoginForm').addEventListener('submit',async event=>{
     $('code').value='';
     FD.notice('loginMsg','');
     $('login').classList.add('hidden');$('dashboard').classList.remove('hidden');
-    await loadDashboard();
+    await loadDashboard();startApplicationMonitoring();
   }catch(e){FD.notice('loginMsg',e.message,true);}
   finally{button.disabled=false;}
 });
@@ -201,6 +203,100 @@ $('backupDownload').onclick=async()=>{
  }catch(e){FD.notice('backupNotice',e.message,true);}
  finally{button.disabled=false;for(const id of ['backupPhrase','backupRepeat','backupAdminCode'])$(id).value='';}
 };
+
+let appSeenIds=null,appTimer=null,appAudio=null,appSoundOn=false;
+let appNotificationBusy=false;
+function renderApplicationBadge(count){
+ const badge=$('applicationTabCount'),label=$('applicationCounter');
+ if(badge)badge.textContent=count?'('+count+')':'';
+ if(label)label.textContent=count===0?'Δεν υπάρχουν νέα αιτήματα.':'Νέα αιτήματα προς έλεγχο: '+count;
+ try{if('setAppBadge' in navigator){if(count)navigator.setAppBadge(count).catch(()=>{});else navigator.clearAppBadge?.().catch(()=>{});}}catch{}
+}
+function playApplicationSound(){
+ if(!appSoundOn||!appAudio||appAudio.state!=='running')return;
+ const base=appAudio.currentTime;
+ for(const [delay,hz] of [[0,660],[.18,880],[.36,1175]]){
+   const o=appAudio.createOscillator(),gain=appAudio.createGain();
+   o.type='sine';o.frequency.value=hz;gain.gain.setValueAtTime(.085,base+delay);
+   gain.gain.exponentialRampToValueAtTime(.001,base+delay+.15);
+   o.connect(gain);gain.connect(appAudio.destination);o.start(base+delay);o.stop(base+delay+.16);
+ }
+}
+$('applicationSoundButton').onclick=async()=>{
+ const button=$('applicationSoundButton');
+ try{
+  if(appSoundOn){appSoundOn=false;await appAudio?.suspend();}
+  else{
+   const Audio=window.AudioContext||window.webkitAudioContext;
+   if(!Audio)throw Error('Ο browser δεν υποστηρίζει ήχο.');
+   appAudio=appAudio||new Audio();
+   await appAudio.resume();
+   if(appAudio.state!=='running')throw Error('Ο browser δεν επέτρεψε ήχο.');
+   appSoundOn=true;playApplicationSound();
+  }
+  button.setAttribute('aria-pressed',String(appSoundOn));
+  button.textContent=appSoundOn?'Απενεργοποίηση ήχου':'Ενεργοποίηση ήχου';
+  FD.notice('applicationNotificationStatus',appSoundOn?'Ο ήχος είναι ενεργός όσο η εφαρμογή παραμένει ανοιχτή.':'Ο ήχος απενεργοποιήθηκε.');
+ }catch(e){appSoundOn=false;FD.notice('applicationNotificationStatus',e.message,true);}
+};
+async function refreshApplicationSummary(){
+ try{
+  const summary=await FD.api('/api/admin/courier-applications/summary');
+  const ids=summary.recentIds||[];
+  if(appSeenIds!==null){
+   const newIds=ids.filter(id=>!appSeenIds.has(id));
+   if(newIds.length){
+    playApplicationSound();
+    FD.notice('applicationNotificationStatus',newIds.length===1?'Νέα δήλωση ενδιαφέροντος! Άνοιξε τις Αιτήσεις.':'Έφτασαν '+newIds.length+' νέα αιτήματα. Άνοιξε τις Αιτήσεις.');
+    if(document.querySelector('[data-tab="applications"].active')&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName))loadCourierApplications().catch(()=>{});
+   }
+  }
+  appSeenIds=new Set(ids);
+  renderApplicationBadge(summary.newCount);
+ }catch(e){
+  if(e.status===401&&appTimer){clearInterval(appTimer);appTimer=null;}
+ }
+}
+function startApplicationMonitoring(){
+ if(appTimer)return;
+ refreshApplicationSummary().catch(()=>{});
+ appTimer=setInterval(refreshApplicationSummary,12000);
+}
+function toApplicationServerKey(b64){
+ const normalized=b64.replace(/-/g,'+').replace(/_/g,'/');
+ const raw=atob(normalized.padEnd(Math.ceil(normalized.length/4)*4,'='));
+ return Uint8Array.from(raw,x=>x.charCodeAt(0));
+}
+async function toggleApplicationPush(){
+ if(appNotificationBusy)return;
+ const button=$('applicationPushButton');appNotificationBusy=true;button.disabled=true;
+ try{
+  if(!location.pathname.startsWith('/app/admin/'))throw Error('Άνοιξε το Fair Delivery από /app/admin/ και εγκατάστησέ το στην αρχική οθόνη για ειδοποιήσεις στο iPhone.');
+  if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))throw Error('Οι ειδοποιήσεις δεν υποστηρίζονται σε αυτή την προβολή. Στο iPhone εγκατάστησε την εφαρμογή από Safari → Κοινή χρήση → Προσθήκη στην οθόνη Αφετηρίας.');
+  const cfg=await FD.api('/api/admin/push/config');
+  if(!cfg.enabled||!cfg.publicKey)throw Error('Οι ειδοποιήσεις κινητού δεν έχουν ενεργοποιηθεί στον server.');
+  const registration=await navigator.serviceWorker.ready;
+  const existing=await registration.pushManager.getSubscription();
+  if(existing){
+    await FD.api('/api/admin/push/subscription',{method:'DELETE',body:JSON.stringify({endpoint:existing.endpoint})});
+    await existing.unsubscribe();
+    button.textContent='Ειδοποιήσεις στο κινητό';
+    FD.notice('applicationNotificationStatus','Οι ειδοποιήσεις σε αυτή τη συσκευή απενεργοποιήθηκαν.');
+    return;
+  }
+  const permission=await Notification.requestPermission();
+  if(permission!=='granted')throw Error('Χρειάζεται να επιτρέψεις τις ειδοποιήσεις στις ρυθμίσεις του κινητού.');
+  const subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:toApplicationServerKey(cfg.publicKey)});
+  try{
+    await FD.api('/api/admin/push/subscription',{method:'POST',body:JSON.stringify({subscription:subscription.toJSON()})});
+  }catch(e){await subscription.unsubscribe().catch(()=>{});throw e;}
+  button.textContent='Διακοπή ειδοποιήσεων';
+  FD.notice('applicationNotificationStatus','Οι ειδοποιήσεις ενεργοποιήθηκαν στη συσκευή σου. Θα εμφανίζονται και όταν η εφαρμογή είναι κλειστή, εφόσον το επιτρέπει το iPhone.');
+ }catch(e){FD.notice('applicationNotificationStatus',e.message,true);}
+ finally{appNotificationBusy=false;button.disabled=false;}
+}
+$('applicationPushButton').onclick=()=>toggleApplicationPush();
+
 $('reloadCourierApplications').addEventListener('click',()=>loadCourierApplications().catch(e=>FD.notice('courierApplicationNotice',e.message,true)));
 boot().catch(e=>{$('mode').textContent='Σφάλμα σύνδεσης: '+e.message;});
 
