@@ -558,7 +558,7 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, { deleted: true });
     }
     const body = await readJson(req, 2048);
-    const statuses = ['new', 'contacted', 'needs-documents', 'reviewing', 'not-suitable'];
+    const statuses = ['new', 'contacted', 'needs-documents', 'reviewing', 'not-suitable', 'resolved'];
     if (!statuses.includes(body.status)) return sendJson(res, 400, { error: 'Μη έγκυρη κατάσταση.' });
     if (body.reviewNotes !== undefined && (typeof body.reviewNotes !== 'string' || body.reviewNotes.length > 500))
       return sendJson(res, 400, { error: 'Οι σημειώσεις επιτρέπονται έως 500 χαρακτήρες.' });
