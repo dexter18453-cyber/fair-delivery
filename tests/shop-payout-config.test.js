@@ -13,4 +13,7 @@ test('bootstrap bank details without exposing pending IRIS to stores',()=>{
  assert.throws(()=>paymentDetails({iban:config.FD_PAYOUT_IBAN,beneficiary:'Synthetic test account',irisPhone:'6900000000'}),{statusCode:400});
  const verified=paymentDetails({iban:config.FD_PAYOUT_IBAN,beneficiary:'Synthetic test account',irisPhone:'6900000000',irisBusinessConfirmed:true});
  assert.equal(visiblePayout(verified,'shop').irisPhone,'6900000000');
+ const confirmed=initialPayout(null,{...config,FD_PAYOUT_IRIS_CONFIRMED:'true'});
+ assert.equal(visiblePayout(confirmed,'shop').irisPhone,'6900000000');
+ assert.equal(visiblePayout(confirmed,'admin').pendingIrisPhone,'');
 });
