@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const adminAuth = require('./admin-auth');
+const adminPush = require('./admin-push');
 let adminPasswordChanging=false;
 const courierInterest=require('./courier-interest');
 const fairAssistant=require('./fair-assistant');
@@ -88,6 +89,7 @@ function normalizeState(parsed = {}) {
     shopCredential: parsed.shopCredential || null,
     adminCredential:parsed.adminCredential||null,
     adminSessions:adminAuth.prune(parsed.adminSessions),
+    adminPushSubscriptions:adminPush.prune(parsed.adminPushSubscriptions),
     stores: parsed.stores && typeof parsed.stores==='object' && !Array.isArray(parsed.stores)?parsed.stores:{},
     defaultStoreName: parsed.defaultStoreName || 'Πρώτο κατάστημα',
     courierApplications: pruneApplications(parsed.courierApplications),
@@ -375,6 +377,24 @@ function offlineHelp(question) {
   return 'Αυτή τη στιγμή λειτουργώ ως βασικός οδηγός, όχι ως μοντέλο AI. Μπορώ να εξηγήσω: (1) σύνδεση καταστήματος και διανομέων, (2) ροή παραγγελίας, (3) χρεώσεις και φόρους, (4) σύνδεση OpenAI. Για ελεύθερες ερωτήσεις χρειάζεται ενεργή σύνδεση API.';
 }
 
+async function alertAdminOfApplication(entry){
+ if(!adminPush.config().available)return;
+ const subscriptions=adminPush.prune(state.adminPushSubscriptions);
+ if(!subscriptions.length)return;
+ const payload={type:'new-application',id:entry.id,kind:entry.kind==='interest'?'interest':'application',url:'/app/admin/#applications'};
+ const results=await Promise.allSettled(subscriptions.map(subscription=>adminPush.send(subscription,payload)));
+ const expired=new Set();
+ for(let i=0;i<results.length;i++){
+  const result=results[i];
+  if(result.status==='fulfilled'&&[404,410].includes(result.value.status))expired.add(subscriptions[i].endpoint);
+ }
+ if(expired.size){
+  state.adminPushSubscriptions=adminPush.prune(state.adminPushSubscriptions).filter(x=>!expired.has(x.endpoint));
+  await persistState().catch(()=>{});
+ }
+}
+function announceNewApplication(entry){alertAdminOfApplication(entry).catch(()=>{});}
+
 async function handleApi(req, res, url) {
   const pathname = url.pathname;
   const method = req.method;
@@ -411,6 +431,7 @@ async function handleApi(req, res, url) {
     const entry={...interest,id:crypto.randomUUID(),createdAt:nowIso(),updatedAt:nowIso(),status:'new',reviewNotes:'',reviewedAt:null};
     state.courierApplications.push(entry);
     try{await persistState();}catch(e){state.courierApplications=state.courierApplications.filter(a=>a.id!==entry.id);throw e;}
+    announceNewApplication(entry);
     return sendJson(res,202,response);
   }
 
@@ -449,8 +470,41 @@ async function handleApi(req, res, url) {
       status: 'new', reviewNotes: '', reviewedAt: null };
     state.courierApplications.push(application);
     await persistState();
+    announceNewApplication(application);
     return sendJson(res, 202, { received: true, screening, 
       message: 'Η αίτηση καταχωρίστηκε για ανθρώπινο έλεγχο. Δεν δημιουργήθηκε λογαριασμός διανομέα.' });
+  }
+
+  if(method==='GET'&&pathname==='/api/admin/courier-applications/summary'){
+    if(!requireRole(req,res,['admin']))return;
+    clearExpiredCourierApplications();
+    const list=[...state.courierApplications].sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+    return sendJson(res,200,{total:list.length,newCount:list.filter(a=>a.status==='new').length,recentIds:list.slice(0,50).map(a=>a.id)});
+  }
+  if(pathname==='/api/admin/push/config'&&method==='GET'){
+    if(!requireRole(req,res,['admin']))return;
+    const info=adminPush.config();
+    return sendJson(res,200,{enabled:info.available,publicKey:info.publicKey,subscribedDevices:adminPush.prune(state.adminPushSubscriptions).length,requiresInstalledApp:true});
+  }
+  if(pathname==='/api/admin/push/subscription'&&['POST','DELETE'].includes(method)){
+    if(!requireRole(req,res,['admin']))return;
+    const origin=req.headers.origin;
+    if(origin&&origin!=='https://'+req.headers.host&&origin!=='http://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    if(!rateLimit(authWindows,'admin-push:'+clientIp(req),12,15*60*1000))return sendJson(res,429,{error:'Πάρα πολλές αλλαγές ειδοποιήσεων.'});
+    if(!adminPush.config().available)return sendJson(res,503,{error:'Οι ειδοποιήσεις δεν έχουν ρυθμιστεί.'});
+    const body=await readJson(req,4096);
+    let next;
+    try{
+      if(method==='POST')next=adminPush.add(state.adminPushSubscriptions,body.subscription);
+      else{
+        if(!adminPush.isEndpoint(body.endpoint))return sendJson(res,400,{error:'Μη έγκυρη συσκευή.'});
+        next=adminPush.remove(state.adminPushSubscriptions,body.endpoint);
+      }
+    }catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
+    const previous=state.adminPushSubscriptions;
+    state.adminPushSubscriptions=next;
+    try{await persistState();}catch(e){state.adminPushSubscriptions=previous;throw e;}
+    return sendJson(res,200,{saved:true,subscribedDevices:next.length});
   }
 
   if (method === 'GET' && pathname === '/api/admin/courier-applications') {
@@ -1383,6 +1437,7 @@ async function serveRoleApp(req, res, url) {
     mime='image/png';cacheControl='public, max-age=604800, immutable';
   } else if (asset === 'sw.js') {
     content = `'use strict';const OFFLINE='${scope}offline.html';const CACHE='fd-pwa-${role}-offline-v1';self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(cache=>cache.add(OFFLINE)).then(()=>self.skipWaiting()));});self.addEventListener('activate',event=>{event.waitUntil(self.clients.claim());});self.addEventListener('fetch',event=>{const url=new URL(event.request.url);if(event.request.mode!=='navigate'||url.origin!==self.location.origin||!url.pathname.startsWith('${scope}'))return;event.respondWith(fetch(event.request).catch(()=>caches.match(OFFLINE)));});`;
+    if(role==='admin')content += \`self.addEventListener('push',event=>{event.waitUntil((async()=>{let payload={};try{payload=event.data?event.data.json():{};}catch{}if(payload.type!=='new-application')return;await self.registration.showNotification('Νέο αίτημα στο Fair Delivery',{body:'Υπάρχει νέα δήλωση ενδιαφέροντος. Άνοιξε τις Αιτήσεις.',tag:'fd-request-'+String(payload.id||Date.now()),icon:'/app/admin/icon-192.png',badge:'/app/admin/icon-192.png',data:{url:'/app/admin/#applications'}});})());});self.addEventListener('notificationclick',event=>{event.notification.close();event.waitUntil((async()=>{const target=new URL('/app/admin/#applications',self.location.origin);const windows=await clients.matchAll({type:'window',includeUncontrolled:true});for(const w of windows){if(new URL(w.url).origin===target.origin&&new URL(w.url).pathname.startsWith('/app/admin/')){await w.focus();w.navigate(target.href);return;}}await clients.openWindow(target.href);})());});\`;
     mime='application/javascript; charset=utf-8';
   } else {
     content = `<!doctype html><html lang="el"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Fair Delivery — Χωρίς σύνδεση</title><style>body{margin:0;display:grid;place-items:center;min-height:100vh;background:#0a0d15;color:#fff;font:16px system-ui;text-align:center;padding:24px}section{max-width:400px}a{color:#ff6b76}</style></head><body><section><h1>Fair Delivery ${config.label}</h1><p>Δεν υπάρχει σύνδεση στο διαδίκτυο. Για τις ζωντανές παραγγελίες χρειάζεται πρόσβαση στο δίκτυο.</p><a href="${scope}">Δοκίμασε ξανά</a></section></body></html>`;
