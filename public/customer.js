@@ -52,6 +52,7 @@ function renderFilteredProducts() {
 async function loadProducts() {
   const suffix=selectedStore==='default'?'':'?storeId='+encodeURIComponent(selectedStore);
   const [menu, config] = await Promise.all([FD.api('/api/products'+suffix), FD.api('/api/config'+suffix)]); products = menu.products;
+  $('cartStoreName').textContent=config.store?.name||'Πρώτο κατάστημα';
   acceptingOrders=config.acceptingOrders!==false;
   FD.notice('shopUnavailable',acceptingOrders?'':'Το κατάστημα δεν δέχεται προσωρινά νέες παραγγελίες.',!acceptingOrders);
   serviceFee = Number(config.settings.customerServiceFee);
