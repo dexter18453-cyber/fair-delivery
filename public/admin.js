@@ -208,7 +208,7 @@ $('backupDownload').onclick=async()=>{
 };
 
 let appSeenIds=null,appTimer=null,appAudio=null,appSoundOn=false;
-let appNotificationBusy=false;
+let appNotificationBusy=false,appPushPreparing=false,appPushState=null;
 function renderApplicationBadge(count){
  const badge=$('applicationTabCount'),label=$('applicationCounter');
  if(badge)badge.textContent=count?'('+count+')':'';
@@ -250,7 +250,7 @@ async function refreshApplicationSummary(){
    const newIds=ids.filter(id=>!appSeenIds.has(id));
    if(newIds.length){
     playApplicationSound();
-    FD.notice('applicationNotificationStatus',newIds.length===1?'Νέα δήλωση ενδιαφέροντος! Άνοιξε τις Αιτήσεις.':'Έφτασαν '+newIds.length+' νέα αιτήματα. Άνοιξε τις Αιτήσεις.');
+    FD.notice('applicationNotificationStatus',newIds.length===1?'Έφτασε νέο αίτημα! Άνοιξε τις Αιτήσεις.':'Έφτασαν '+newIds.length+' νέα αιτήματα. Άνοιξε τις Αιτήσεις.');
     if(document.querySelector('[data-tab="applications"].active')&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName))loadCourierApplications().catch(()=>{});
    }
   }
@@ -263,6 +263,7 @@ async function refreshApplicationSummary(){
 function startApplicationMonitoring(){
  if(appTimer)return;
  refreshApplicationSummary().catch(()=>{});
+ prepareApplicationPush();
  appTimer=setInterval(refreshApplicationSummary,12000);
 }
 function toApplicationServerKey(b64){
@@ -270,29 +271,59 @@ function toApplicationServerKey(b64){
  const raw=atob(normalized.padEnd(Math.ceil(normalized.length/4)*4,'='));
  return Uint8Array.from(raw,x=>x.charCodeAt(0));
 }
-async function toggleApplicationPush(){
- if(appNotificationBusy)return;
- const button=$('applicationPushButton');appNotificationBusy=true;button.disabled=true;
+function checkApplicationPushSupport(){
+ if(!location.pathname.startsWith('/app/admin/'))throw Error('Άνοιξε το Fair Delivery από /app/admin/ και εγκατάστησέ το στην αρχική οθόνη για ειδοποιήσεις στο iPhone.');
+ if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))throw Error('Οι ειδοποιήσεις δεν υποστηρίζονται σε αυτή την προβολή. Στο iPhone εγκατάστησε την εφαρμογή από Safari → Κοινή χρήση → Προσθήκη στην οθόνη Αφετηρίας.');
+}
+async function prepareApplicationPush(){
+ if(appPushPreparing||appNotificationBusy)return;
+ const button=$('applicationPushButton');appPushPreparing=true;appPushState=null;button.disabled=true;
+ button.textContent='Προετοιμασία ειδοποιήσεων…';
  try{
-  if(!location.pathname.startsWith('/app/admin/'))throw Error('Άνοιξε το Fair Delivery από /app/admin/ και εγκατάστησέ το στην αρχική οθόνη για ειδοποιήσεις στο iPhone.');
-  if(!('serviceWorker' in navigator)||!('PushManager' in window)||!('Notification' in window))throw Error('Οι ειδοποιήσεις δεν υποστηρίζονται σε αυτή την προβολή. Στο iPhone εγκατάστησε την εφαρμογή από Safari → Κοινή χρήση → Προσθήκη στην οθόνη Αφετηρίας.');
+  checkApplicationPushSupport();
   const cfg=await FD.api('/api/admin/push/config');
   if(!cfg.enabled||!cfg.publicKey)throw Error('Οι ειδοποιήσεις κινητού δεν έχουν ενεργοποιηθεί στον server.');
-  const registration=await navigator.serviceWorker.ready;
-  const existing=await registration.pushManager.getSubscription();
-  if(existing){
-    await FD.api('/api/admin/push/subscription',{method:'DELETE',body:JSON.stringify({endpoint:existing.endpoint})});
-    await existing.unsubscribe();
+  let timeout;
+  const registration=await Promise.race([
+   navigator.serviceWorker.ready,
+   new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('Η προετοιμασία καθυστέρησε. Πάτησε ξανά για επανάληψη.')),10000);})
+  ]).finally(()=>clearTimeout(timeout));
+  const subscription=await registration.pushManager.getSubscription();
+  // Restore an already-authorized device after a reload without asking again.
+  if(subscription)await FD.api('/api/admin/push/subscription',{method:'POST',body:JSON.stringify({subscription:subscription.toJSON()})});
+  appPushState={registration,publicKey:toApplicationServerKey(cfg.publicKey),subscription};
+  button.textContent=subscription?'Διακοπή ειδοποιήσεων':'Ειδοποιήσεις στο κινητό';
+ }catch(e){
+  button.textContent='Ειδοποιήσεις στο κινητό';
+  FD.notice('applicationNotificationStatus',e.message,true);
+ }finally{appPushPreparing=false;button.disabled=false;}
+}
+async function toggleApplicationPush(){
+ if(appNotificationBusy||appPushPreparing)return;
+ if(!appPushState){
+  await prepareApplicationPush();
+  if(appPushState)FD.notice('applicationNotificationStatus','Η προετοιμασία ολοκληρώθηκε. Πάτησε ξανά για να αλλάξεις τις ειδοποιήσεις.');
+  return;
+ }
+ const button=$('applicationPushButton'),setup=appPushState;appNotificationBusy=true;button.disabled=true;
+ try{
+  checkApplicationPushSupport();
+  if(setup.subscription){
+    await FD.api('/api/admin/push/subscription',{method:'DELETE',body:JSON.stringify({endpoint:setup.subscription.endpoint})});
+    await setup.subscription.unsubscribe();
+    setup.subscription=null;
     button.textContent='Ειδοποιήσεις στο κινητό';
     FD.notice('applicationNotificationStatus','Οι ειδοποιήσεις σε αυτή τη συσκευή απενεργοποιήθηκαν.');
     return;
   }
-  const permission=await Notification.requestPermission();
-  if(permission!=='granted')throw Error('Χρειάζεται να επιτρέψεις τις ειδοποιήσεις στις ρυθμίσεις του κινητού.');
-  const subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:toApplicationServerKey(cfg.publicKey)});
+  if(Notification.permission==='denied')throw Error('Χρειάζεται να επιτρέψεις τις ειδοποιήσεις στις ρυθμίσεις του κινητού.');
+  // Safari needs subscribe() inside the tap handler, before any awaited work.
+  // The server key and active service worker were prepared after login.
+  const subscription=await setup.registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:setup.publicKey});
   try{
     await FD.api('/api/admin/push/subscription',{method:'POST',body:JSON.stringify({subscription:subscription.toJSON()})});
   }catch(e){await subscription.unsubscribe().catch(()=>{});throw e;}
+  setup.subscription=subscription;
   button.textContent='Διακοπή ειδοποιήσεων';
   FD.notice('applicationNotificationStatus','Οι ειδοποιήσεις ενεργοποιήθηκαν στη συσκευή σου. Θα εμφανίζονται και όταν η εφαρμογή είναι κλειστή, εφόσον το επιτρέπει το iPhone.');
  }catch(e){FD.notice('applicationNotificationStatus',e.message,true);}
