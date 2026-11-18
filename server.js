@@ -1,5 +1,6 @@
 'use strict';
 
+const { dispatchReadyOrders } = require('./ready-dispatch');
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -131,6 +132,7 @@ function privateOrder(order) {
     customerPhone: order.customerPhone || '',
     deliveryAddress: order.deliveryAddress || '',
     deliveryManagedByShop: Boolean(order.deliveryManagedByShop),
+    waitingForRider: order.status === 'ready' && Boolean(order.dispatchRequestedAt),
     assignedRider: order.assignedRider || null,
     assignedRiderName: rider?.name || order.assignedRiderName || null
   };
@@ -1054,6 +1056,12 @@ async function handleApi(req, res, url) {
       order.riderPayEstimate = round2(state.settings.riderBaseAmount + order.estimatedKm * state.settings.riderPerKm + (order.badWeather ? state.settings.badWeatherBonus : 0));
     }
     order.status = status; order.updatedAt = nowIso();
+    if (session.role === 'shop' && status === 'ready' && body.autoAssign === true) {
+      order.dispatchRequestedAt = order.updatedAt;
+    }
+    if (order.dispatchRequestedAt || ['delivered', 'cancelled'].includes(status)) {
+      dispatchReadyOrders(state, order.storeId || 'default', order.updatedAt);
+    }
     if(status==='delivered' && order.billingModel==='shop-fixed-v1') order.completedAt=order.updatedAt;
     if (['delivered', 'cancelled'].includes(status)) order.riderLocation = null;
     await persistState();
@@ -1327,6 +1335,7 @@ async function handleApi(req, res, url) {
     if (typeof body.online !== 'boolean') return sendJson(res, 400, { error: 'Η κατάσταση online πρέπει να είναι true ή false.' });
     state.riders[session.userId] = { ...(state.riders[session.userId] || {}), online: body.online, updatedAt: nowIso() };
     if (!body.online) hideRiderLocation(session.userId);
+    else dispatchReadyOrders(state, state.riders[session.userId].storeId || 'default', nowIso());
     await persistState();
     return sendJson(res, 200, { rider: riderProfile(state.riders[session.userId]) });
   }
