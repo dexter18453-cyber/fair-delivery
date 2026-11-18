@@ -50,11 +50,27 @@ async function loadCourierApplications(){
   }));
 }
 
+async function loadBilling(){
+  const data=await FD.api('/api/shop/billing');
+  $('billingOutstanding').textContent=FD.money(data.outstandingCents/100);
+  $('billingDays').innerHTML=data.days.map(d=>`<article class="order"><b>${FD.esc(d.day)}</b><p class="hint">${d.completed} ολοκληρωμένες · Σύνολο ${FD.money(d.feeCents/100)} · Καταχωρισμένες εξοφλήσεις ${FD.money(d.settledCents/100)}</p><b>Εκκρεμούν ${FD.money(d.outstandingCents/100)}</b>${d.outstandingCents?`<div class="actions"><button type="button" data-bill-day="${FD.esc(d.day)}" data-bill-cents="${d.outstandingCents}">Καταχώριση δοκιμαστικής εξόφλησης</button></div>`:''}</article>`).join('')||'<p class="hint">Καμία ολοκληρωμένη παραγγελία στο νέο μοντέλο.</p>';
+  $('billingHistory').innerHTML=data.history.map(x=>`<div class="product"><div><b>${FD.esc(x.day)} · ${FD.money(x.amountCents/100)}</b><p class="hint">Δοκιμαστική καταχώριση · ${new Date(x.recordedAt).toLocaleString('el-GR')}</p></div></div>`).join('')||'<p class="hint">Καμία καταχώριση ακόμα.</p>';
+  document.querySelectorAll('[data-bill-day]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('Να καταχωριστεί δοκιμαστική εξόφληση '+FD.money(Number(b.dataset.billCents)/100)+'; Δεν γίνεται είσπραξη.'))return;
+    b.disabled=true;
+    try{await FD.api('/api/admin/shop-settlements',{method:'POST',body:JSON.stringify({day:b.dataset.billDay,expectedCents:Number(b.dataset.billCents),confirmPilot:true})});FD.notice('billingNotice','Η δοκιμαστική εξόφληση καταχωρίστηκε.');}
+    catch(e){FD.notice('billingNotice',e.message,true);}
+    finally{await loadBilling().catch(e=>FD.notice('billingNotice',e.message,true));}
+  });
+}
+$('billingRefresh').onclick=()=>loadBilling().catch(e=>FD.notice('billingNotice',e.message,true));
+
 async function loadDashboard() {
+  await loadBilling();
   const [stats, orders, config] = await Promise.all([FD.api('/api/stats'), FD.api('/api/orders'), FD.api('/api/config')]);
   $('active').textContent = stats.activeOrders; $('today').textContent = stats.ordersToday; $('delivered').textContent = stats.deliveredToday;
   $('gross').textContent = FD.money(stats.grossValueToday); $('platformFee').textContent = FD.money(stats.platformFeeToday); $('online').textContent = stats.riderCountOnline;
-  $('orders').innerHTML = orders.orders.length ? `<table><thead><tr><th>Κωδικός</th><th>Κατάσταση</th><th>Ποσό</th><th>Πληρωμή (δοκιμή)</th><th>Service fee</th><th>Απόσταση</th><th>Δημιουργήθηκε</th></tr></thead><tbody>${orders.orders.map(o=>`<tr><td>${FD.esc(o.id.slice(0,8))}</td><td>${FD.esc(FD.status(o.status))}</td><td>${FD.money(o.total)}</td><td>${FD.esc(({cash:'Μετρητά',card:'Κάρτα',iris:'IRIS'})[o.paymentMethod]||'—')} · Χωρίς χρέωση</td><td>${FD.money(o.serviceFee)}</td><td>${o.estimatedKm == null ? '—' : FD.esc(o.estimatedKm+' km')}</td><td>${new Date(o.createdAt).toLocaleString('el-GR')}</td></tr>`).join('')}</tbody></table>` : '<p class="hint">Δεν υπάρχουν ακόμη παραγγελίες.</p>';
+  $('orders').innerHTML = orders.orders.length ? `<table><thead><tr><th>Κωδικός</th><th>Κατάσταση</th><th>Ποσό</th><th>Πληρωμή (δοκιμή)</th><th>Χρέωση καταστήματος</th><th>Απόσταση</th><th>Δημιουργήθηκε</th></tr></thead><tbody>${orders.orders.map(o=>`<tr><td>${FD.esc(o.id.slice(0,8))}</td><td>${FD.esc(FD.status(o.status))}</td><td>${FD.money(o.total)}</td><td>${FD.esc(({cash:'Μετρητά',card:'Κάρτα',iris:'IRIS'})[o.paymentMethod]||'—')} · Χωρίς χρέωση</td><td>${FD.money(o.status==='delivered'?(o.shopFeeCents||0)/100:0)}</td><td>${o.estimatedKm == null ? '—' : FD.esc(o.estimatedKm+' km')}</td><td>${new Date(o.createdAt).toLocaleString('el-GR')}</td></tr>`).join('')}</tbody></table>` : '<p class="hint">Δεν υπάρχουν ακόμη παραγγελίες.</p>';
   for (const key of ['customerServiceFee','shopDeliveryFee','shopCommissionPercent','riderBaseAmount','riderPerKm','badWeatherBonus']) $(key).value = config.settings[key];
   await loadCourierApplications();
 }

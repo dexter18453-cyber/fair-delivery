@@ -96,7 +96,7 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   assert.equal(applicationSubmission.screening.status,'needs-information');
   assert.equal(applicationSubmission.screening.requiresHumanVerification,true);
   await login('shop');
-  assert.equal((await api('/api/config')).settings.customerServiceFee, 1.79);
+  assert.equal((await api('/api/config')).settings.customerServiceFee, 0);
   const created = await api('/api/shop/riders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Test Rider' }) });
   assert.ok(created.rider.id); assert.ok(created.accessCode);
   const riderList = await api('/api/shop/riders'); assert.equal(riderList.riders.length, 1); assert.equal(riderList.riders[0].id, created.rider.id);
@@ -110,9 +110,9 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   const orderResult = await api('/api/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: [{ productId: menu.products[0].id, qty: 2 }], customerName: 'Test Customer', customerPhone: '6900000000', deliveryAddress: 'Test Street 10, Athens', deliveryLocation: { lat: 37.98, lng: 23.72 }, privacyConsent: true }) });
   assert.match(orderResult.trackingUrl, /^\/app\/customer\/\?order=/);
   const id = orderResult.order.id; assert.equal(orderResult.order.status, 'new'); assert.deepEqual(orderResult.order.deliveryLocation, { lat: 37.98, lng: 23.72 });
-  assert.equal(orderResult.order.serviceFee, 1.79);
+  assert.equal(orderResult.order.serviceFee, 0);
   assert.equal(orderResult.order.deliveryFee, 1.5);
-  assert.equal(orderResult.order.total, 13.09);
+  assert.equal(orderResult.order.total, 11.3);
   await api(`/api/orders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'accepted' }) });
   await api(`/api/orders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'ready' }) });
   const assigned = await api(`/api/orders/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'assigned', riderId: created.rider.id }) });
@@ -178,7 +178,18 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   assert.equal((await fetch(base+'/api/orders/'+ownerOrder.id)).status,404);
   activeRole='admin';
 
-  assert.equal(stats.platformFeeToday, 3.58);
+  assert.equal(stats.platformFeeToday, 2);
+  const bill=await api('/api/shop/billing');
+  assert.equal(bill.feePerOrderCents,100);
+  assert.equal(bill.outstandingCents,200);
+  assert.equal(bill.days[0].completed,2);
+  const settlement=await api('/api/admin/shop-settlements',{method:'POST',body:JSON.stringify({day:bill.days[0].day,expectedCents:200,confirmPilot:true})});
+  assert.equal(settlement.outstandingCents,0);
+  assert.equal(settlement.settlement.amountCents,200);
+  const duplicate=await fetch(base+'/api/admin/shop-settlements',{method:'POST',headers:{'Content-Type':'application/json','X-FD-Role':'admin',Cookie:Object.values(cookies).join('; ')},body:JSON.stringify({day:bill.days[0].day,expectedCents:200,confirmPilot:true})});
+  assert.equal(duplicate.status,409);
+  const shopForbidden=await fetch(base+'/api/admin/shop-settlements',{method:'POST',headers:{'Content-Type':'application/json','X-FD-Role':'shop',Cookie:Object.values(cookies).join('; ')},body:JSON.stringify({day:bill.days[0].day,expectedCents:200,confirmPilot:true})});
+  assert.equal(shopForbidden.status,401);
   const shopCode = await api('/api/admin/shop-code', { method: 'POST' }); assert.ok(shopCode.accessCode);
   const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8')); assert.equal(saved.orders.length, 3); assert.equal(Object.keys(saved.customers).length,0); assert.ok(saved.riders[created.rider.id].codeHash); assert.ok(saved.shopCredential.codeHash);
   console.log('PASS: health, static assets, shop login, stable rider account, individual rider credentials, checkout contact/address/map pin, shop assignment, rider-only assigned orders, GPS update, privacy-safe tracking, delivery workflow, payout estimate, admin stats and persistence.');

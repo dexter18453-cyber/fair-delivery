@@ -4,6 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
 const { validateApplication, evaluateApplication, pruneApplications } = require('./courier-onboarding');
 
@@ -34,7 +35,8 @@ const authWindows = new Map();
 
 const DEFAULT_SETTINGS = {
   currency: 'EUR',
-  customerServiceFee: 1.79,
+  customerServiceFee: 0,
+  shopOrderFee: 1,
   shopDeliveryFee: 0,
   shopCommissionPercent: 0,
   riderBaseAmount: 2.50,
@@ -55,12 +57,11 @@ let postgresPool = null;
 
 function normalizeState(parsed = {}) {
   const settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) };
-  // This is a one-time pricing migration. Later admin edits must not be overridden.
-  if (settings.pricingVersion !== 2) {
-    settings.customerServiceFee = 1.79;
-    settings.shopCommissionPercent = 0;
-    settings.pricingVersion = 2;
-  }
+  // Fixed shop-funded pricing. Never reprice historical orders.
+  settings.customerServiceFee = 0;
+  settings.shopCommissionPercent = 0;
+  settings.shopOrderFee = FEE_CENTS / 100;
+  settings.pricingVersion = 3;
   return {
     settings,
     products: Array.isArray(parsed.products) ? parsed.products : DEFAULT_PRODUCTS,
@@ -68,7 +69,8 @@ function normalizeState(parsed = {}) {
     riders: parsed.riders && typeof parsed.riders === 'object' ? parsed.riders : {},
     shopCredential: parsed.shopCredential || null,
     courierApplications: pruneApplications(parsed.courierApplications),
-    customers: parsed.customers && typeof parsed.customers === 'object' && !Array.isArray(parsed.customers) ? parsed.customers : {}
+    customers: parsed.customers && typeof parsed.customers === 'object' && !Array.isArray(parsed.customers) ? parsed.customers : {},
+    shopSettlements: Array.isArray(parsed.shopSettlements) ? parsed.shopSettlements : []
   };
 }
 
@@ -93,6 +95,8 @@ function privateOrder(order) {
   const rider = order.assignedRider ? state.riders[order.assignedRider] : null;
   return {
     ...publicOrder(order),
+    shopFeeCents: order.billingModel==='shop-fixed-v1' ? order.shopFeeCents : 0,
+    completedAt: order.completedAt || null,
     customerName: order.customerName || '',
     customerPhone: order.customerPhone || '',
     deliveryAddress: order.deliveryAddress || '',
@@ -310,12 +314,12 @@ function validateMoney(value, name, max = 5000) {
 
 function offlineHelp(question) {
   const q = question.toLocaleLowerCase('el-GR');
-  const fee = `${state.settings.customerServiceFee.toFixed(2).replace('.', ',')} ευρώ`;
+  const fee = '1 ευρώ ανά ολοκληρωμένη παραγγελία από το κατάστημα';
   if (/κωδικ|συνδε|λογαριασ|διανομ|rider/.test(q)) {
     return `Σύνδεση: ο διαχειριστής μπαίνει στο Control Center. Από εκεί εκδίδει νέο κωδικό καταστήματος. Το κατάστημα δημιουργεί κάθε διανομέα και του δίνει προσωπικό ID και κωδικό. Οι διανομείς δεν έχουν κοινό κωδικό. ${postgresPool ? 'Η βάση PostgreSQL είναι ενεργή.' : 'ΠΡΟΣΟΧΗ: η βάση είναι προσωρινή· οι λογαριασμοί μπορεί να χαθούν μετά από restart.'}`;
   }
   if (/κοστο|χρεω|κερδ|φορο|φπα|τιμ|price|fee/.test(q)) {
-    return `Η δοκιμαστική χρέωση Fair Delivery είναι ${fee} ανά παραγγελία, με προμήθεια καταστήματος 0%. Η διανομή του καταστήματος είναι ${state.settings.shopDeliveryFee.toFixed(2).replace('.', ',')} ευρώ. Αυτά είναι μικτά ποσά, όχι καθαρό κέρδος. Για πραγματικούς φόρους, ΦΠΑ, παραστατικά και πληρωμές χρειάζεται λογιστική έγκριση πριν από εμπορική λειτουργία.`;
+    return `Η δοκιμαστική χρέωση Fair Delivery είναι ${fee}, με μηδενική χρέωση υπηρεσίας στον πελάτη και 0% ποσοστιαία προμήθεια. Η διανομή του καταστήματος είναι ${state.settings.shopDeliveryFee.toFixed(2).replace('.', ',')} ευρώ. Αυτά είναι μικτά ποσά, όχι καθαρό κέρδος. Για πραγματικούς φόρους, ΦΠΑ, παραστατικά και πληρωμές χρειάζεται λογιστική έγκριση πριν από εμπορική λειτουργία.`;
   }
   if (/παραγγελ|ακυρω|καταστημ|πελατ/.test(q)) {
     return 'Η δοκιμαστική παραγγελία πηγαίνει από τον πελάτη στο κατάστημα: νέα → αποδοχή → ετοιμασία → ανάθεση στον διανομέα του καταστήματος → παραλαβή → παράδοση. Σε ακύρωση απαιτείται καταγραφή της αιτίας και, πριν από πραγματικές πληρωμές, ξεκάθαρη πολιτική επιστροφών.';
@@ -622,8 +626,9 @@ async function handleApi(req, res, url) {
       ...payment, customerId: customerAccount?.id || null, trackingPrivate: Boolean(customerAccount),
       customerName, customerPhone, deliveryAddress,
       deliveryLocation: { lat: deliveryLat, lng: deliveryLng },
-      serviceFee: round2(state.settings.customerServiceFee), deliveryFee: round2(state.settings.shopDeliveryFee),
-      total: round2(subtotal + state.settings.customerServiceFee + state.settings.shopDeliveryFee),
+      serviceFee: 0, deliveryFee: round2(state.settings.shopDeliveryFee),
+      total: round2(subtotal + state.settings.shopDeliveryFee),
+      billingModel: 'shop-fixed-v1', shopFeeCents: FEE_CENTS, completedAt: null,
       status: 'new', createdAt: nowIso(), updatedAt: nowIso(),
       estimatedKm: null, badWeather: false, riderPayEstimate: null,
       assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
@@ -695,15 +700,33 @@ async function handleApi(req, res, url) {
       order.riderPayEstimate = round2(state.settings.riderBaseAmount + order.estimatedKm * state.settings.riderPerKm + (order.badWeather ? state.settings.badWeatherBonus : 0));
     }
     order.status = status; order.updatedAt = nowIso();
+    if(status==='delivered' && order.billingModel==='shop-fixed-v1') order.completedAt=order.updatedAt;
     if (['delivered', 'cancelled'].includes(status)) order.riderLocation = null;
     await persistState();
     return sendJson(res, 200, { order: privateOrder(order) });
   }
 
+  if(method==='GET' && pathname==='/api/shop/billing'){
+    const session=requireRole(req,res,['shop','admin']);if(!session)return;
+    return sendJson(res,200,settlementSummary(state.orders,state.shopSettlements,session.storeId||'default'));
+  }
+  if(method==='POST' && pathname==='/api/admin/shop-settlements'){
+    const session=requireRole(req,res,['admin']);if(!session)return;
+    const body=await readJson(req,1024);
+    if(body.confirmPilot!==true)return sendJson(res,400,{error:'Απαιτείται επιβεβαίωση ότι η καταχώριση είναι αποκλειστικά δοκιμαστική.'});
+    let entry;
+    try{entry=recordSettlement(state.orders,state.shopSettlements,session.storeId||'default',body.day,body.expectedCents);}
+    catch(error){return sendJson(res,error.statusCode||400,{error:error.message});}
+    state.shopSettlements.push(entry);
+    try{await persistState();}catch(error){state.shopSettlements=state.shopSettlements.filter(x=>x.id!==entry.id);throw error;}
+    return sendJson(res,201,{settlement:entry,...settlementSummary(state.orders,state.shopSettlements,session.storeId||'default')});
+  }
+
   if (method === 'GET' && pathname === '/api/stats') {
     const session = requireRole(req, res, ['admin']); if (!session) return;
-    const today = new Date().toISOString().slice(0, 10);
-    const todayOrders = state.orders.filter(o => o.createdAt.startsWith(today));
+    const today = athensDay();
+    const todayOrders = state.orders.filter(o => athensDay(o.createdAt)===today);
+    const billing=settlementSummary(state.orders,state.shopSettlements,'default',today);
     return sendJson(res, 200, {
       activeOrders: state.orders.filter(o => !['delivered', 'cancelled'].includes(o.status)).length,
       ordersToday: todayOrders.length,
@@ -711,7 +734,7 @@ async function handleApi(req, res, url) {
       grossValueToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal, 0)),
       shopsCommissionToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal * state.settings.shopCommissionPercent / 100, 0)),
       riderCountOnline: Object.values(state.riders).filter(r => r.online).length,
-      platformFeeToday: round2(todayOrders.filter(o => o.status === 'delivered').reduce((s, o) => s + o.serviceFee, 0))
+      platformFeeToday: (billing.days.find(d=>d.day===today)?.feeCents||0)/100
     });
   }
 
@@ -725,6 +748,7 @@ async function handleApi(req, res, url) {
         const value = Number(body[key]);
         const max = key === 'shopCommissionPercent' ? 100 : 1000;
         if (!Number.isFinite(value) || value < 0 || value > max) return sendJson(res, 400, { error: `Μη έγκυρη τιμή για ${key}.` });
+        if (key === 'customerServiceFee' && value !== 0) return sendJson(res,400,{error:'Η χρέωση πελάτη παραμένει μηδενική.'});
         if (key === 'shopCommissionPercent' && value !== 0) return sendJson(res, 400, { error: 'Στο πιλοτικό Fair Delivery η προμήθεια καταστήματος παραμένει 0%.' });
         settings[key] = round2(value);
       }

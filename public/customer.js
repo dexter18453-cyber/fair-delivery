@@ -64,7 +64,7 @@ async function loadProducts() {
   }
   $('productSearch')?.addEventListener('input',renderFilteredProducts);
   renderFilteredProducts();
-  $('feeNote').textContent = `Χρέωση Fair Delivery: ${FD.money(serviceFee)} · Διανομή από το κατάστημα: ${FD.money(deliveryFee)} · Πιλοτική δοκιμή χωρίς online πληρωμή.`;
+  $('feeNote').textContent = `Χωρίς χρέωση Fair Delivery στον πελάτη. Διανομή καταστήματος: ${FD.money(deliveryFee)}. Πληρωμή απευθείας στο κατάστημα στην πραγματική λειτουργία.`;
 }
 $('placeOrder').addEventListener('click', async () => {
   if (submitting) return;
