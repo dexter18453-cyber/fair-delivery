@@ -72,7 +72,7 @@ function normalizeState(parsed = {}) {
     courierApplications: pruneApplications(parsed.courierApplications),
     customers: parsed.customers && typeof parsed.customers === 'object' && !Array.isArray(parsed.customers) ? parsed.customers : {},
     shopSettlements: Array.isArray(parsed.shopSettlements) ? parsed.shopSettlements : [],
-    shopPayout: initialPayout(parsed.shopPayout),
+    shopPayout: initialPayout(parsed.shopPayout,process.env.NODE_ENV==='production'?process.env:{}),
     shopHolds: parsed.shopHolds || {},
     shopHoldHistory: Array.isArray(parsed.shopHoldHistory)?parsed.shopHoldHistory:[]
   };
