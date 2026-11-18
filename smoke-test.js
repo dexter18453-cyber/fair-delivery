@@ -149,9 +149,34 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   assert.equal(erased.deleted,true);
   assert.equal((await api('/api/admin/courier-applications')).applications.length,0);
   const stats = await api('/api/stats'); assert.equal(stats.ordersToday, 2); assert.equal(stats.deliveredToday, 2);
+  // Register a synthetic account and prove all payment choices are pilot-only.
+  const register=await fetch(base+'/api/customer/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:'demo-test123',password:'synthetic-test-pass-123',pilotAcknowledged:true})});
+  assert.equal(register.status,200); const registered=await register.json();
+  assert.ok(registered.account.alias); assert.equal(registered.account.passwordHash,undefined);
+  rememberCookie(register,'customer');
+  const contact={items:[{productId:menu.products[0].id,qty:1}],customerName:'Pilot Test',customerPhone:'6900000088',deliveryAddress:'Test Street 1, Athens',deliveryLocation:{lat:37.98,lng:23.72},privacyConsent:true};
+  for(const paymentMethod of ['cash','card','iris']){
+    const response=await api('/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...contact,paymentMethod,confirmPaymentSimulation:true,paymentCollected:true,paymentStatus:'paid'})});
+    assert.equal(response.order.paymentMethod,paymentMethod);
+    assert.equal(response.order.paymentCollected,false);
+    assert.equal(response.order.paymentStatus,'pilot_not_charged');
+    assert.equal((await fetch(base+'/api/orders/'+response.order.id)).status,404);
+  }
+  const ownOrders=await api('/api/customer/orders');
+  assert.equal(ownOrders.orders.length,3);
+  assert.equal((await fetch(base+'/api/customer/orders')).status,401);
+  const blocked=await fetch(base+'/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...contact,paymentMethod:'card',confirmPaymentSimulation:true})});
+  assert.equal(blocked.status,401);
+  const ownerOrder=ownOrders.orders[0];
+  const privateRead=await api('/api/orders/'+ownerOrder.id);assert.equal(privateRead.order.id,ownerOrder.id);
+  const deleteAccount=await api('/api/customer/account',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:'synthetic-test-pass-123',confirmDelete:true})});
+  assert.equal(deleteAccount.deleted,true);
+  assert.equal((await fetch(base+'/api/orders/'+ownerOrder.id)).status,404);
+  activeRole='admin';
+
   assert.equal(stats.platformFeeToday, 3.58);
   const shopCode = await api('/api/admin/shop-code', { method: 'POST' }); assert.ok(shopCode.accessCode);
-  const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8')); assert.equal(saved.orders.length, 2); assert.ok(saved.riders[created.rider.id].codeHash); assert.ok(saved.shopCredential.codeHash);
+  const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8')); assert.equal(saved.orders.length, 5); assert.equal(Object.keys(saved.customers).length,0); assert.ok(saved.riders[created.rider.id].codeHash); assert.ok(saved.shopCredential.codeHash);
   console.log('PASS: health, static assets, shop login, stable rider account, individual rider credentials, checkout contact/address/map pin, shop assignment, rider-only assigned orders, GPS update, privacy-safe tracking, delivery workflow, payout estimate, admin stats and persistence.');
  } catch (e) { console.error('FAIL:', e); process.exitCode = 1; }
  finally { child.kill('SIGTERM'); setTimeout(() => { try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch {} }, 1000); }
