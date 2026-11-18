@@ -435,6 +435,26 @@ async function handleApi(req, res, url) {
     return sendJson(res,202,response);
   }
 
+  if(method==='POST'&&pathname==='/api/courier-interest/privacy-request'){
+    const settings=courierInterest.config(process.env,DEMO_MODE);
+    if(!settings.open)return sendJson(res,503,{error:'Η υποβολή αιτημάτων δεν είναι διαθέσιμη. Χρησιμοποίησε τα δημοσιευμένα στοιχεία επικοινωνίας.'});
+    const origin=req.headers.origin;
+    if(origin&&origin!=='http://'+req.headers.host&&origin!=='https://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    if(!rateLimit(requestWindows,'interest-privacy:'+clientIp(req),3,60*60_000))return sendJson(res,429,{error:'Πολλά αιτήματα. Προσπάθησε αργότερα.'});
+    const body=await readJson(req,2048);
+    let request;
+    try{request=courierInterest.validatePrivacyRequest(body,settings);}catch(e){return sendJson(res,400,{error:e.message});}
+    state.courierApplications=pruneApplications(state.courierApplications);
+    const response={received:true,message:'Το αίτημά σου καταχωρίστηκε για έλεγχο. Θα χρειαστεί να επιβεβαιωθεί ότι η διεύθυνση email σου ανήκει πριν γίνει πρόσβαση, αλλαγή ή διαγραφή. Δεν πραγματοποιήθηκε αυτόματη ενέργεια.'};
+    if(state.courierApplications.some(a=>a.kind==='privacy-request'&&a.email===request.email&&a.requestType===request.requestType&&Date.now()-Date.parse(a.createdAt)<24*60*60_000))return sendJson(res,202,response);
+    if(state.courierApplications.length>=300)return sendJson(res,503,{error:'Δεν μπορούν να υποβληθούν νέα αιτήματα προσωρινά.'});
+    const entry={...request,id:crypto.randomUUID(),createdAt:nowIso(),updatedAt:nowIso(),status:'new',reviewNotes:'',reviewedAt:null};
+    state.courierApplications.push(entry);
+    try{await persistState();}catch(e){state.courierApplications=state.courierApplications.filter(a=>a.id!==entry.id);throw e;}
+    announceNewApplication(entry);
+    return sendJson(res,202,response);
+  }
+
   if (method === 'GET' && pathname === '/api/courier-applications/config') {
     return sendJson(res, 200, {
       open: DEMO_MODE || process.env.COURIER_APPLICATIONS_OPEN === 'true',
