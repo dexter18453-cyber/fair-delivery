@@ -51,8 +51,21 @@ async function loadCourierApplications(){
   }));
 }
 
+let billingStore='default';
+async function loadStoreAdmin(){
+  const {stores}=await FD.api('/api/admin/stores');
+  $('billingStore').innerHTML=stores.map(s=>`<option value="${FD.esc(s.id)}">${FD.esc(s.name)}${s.active?'':' — προετοιμασία'}</option>`).join('');
+  $('billingStore').value=billingStore;
+  $('storeList').innerHTML=stores.map(s=>`<article class="order"><b>${FD.esc(s.name)}</b><p class="hint">ID: ${FD.esc(s.id)} · ${s.active?'Ορατό στο πιλοτικό μενού':'Προετοιμασία'}</p><button type="button" class="secondary" data-store-rename="${FD.esc(s.id)}">Μετονομασία</button> ${s.id==='default'?'':`<button type="button" class="secondary" data-store-toggle="${FD.esc(s.id)}" data-active="${s.active}">${s.active?'Απόκρυψη':'Εμφάνιση στο πιλοτικό μενού'}</button>`}</article>`).join('');
+  document.querySelectorAll('[data-store-toggle]').forEach(b=>b.onclick=async()=>{try{await FD.api('/api/admin/stores',{method:'PATCH',body:JSON.stringify({storeId:b.dataset.storeToggle,active:b.dataset.active!=='true'})});await loadStoreAdmin();await loadBilling();}catch(e){FD.notice('storesNotice',e.message,true);}});
+  document.querySelectorAll('[data-store-rename]').forEach(b=>b.onclick=async()=>{const name=prompt('Νέο όνομα καταστήματος');if(!name)return;try{await FD.api('/api/admin/stores',{method:'PATCH',body:JSON.stringify({storeId:b.dataset.storeRename,name})});await loadStoreAdmin();}catch(e){FD.notice('storesNotice',e.message,true);}});
+}
+$('billingStore').onchange=()=>{billingStore=$('billingStore').value;loadBilling().catch(e=>FD.notice('billingNotice',e.message,true));};
+$('createStore').onclick=async()=>{const button=$('createStore');button.disabled=true;try{const r=await FD.api('/api/admin/stores',{method:'POST',body:JSON.stringify({name:$('newStoreName').value})});$('newStoreName').value='';FD.notice('storesNotice','ID: '+r.store.id+' · Κωδικός (μία φορά): '+r.accessCode);await loadStoreAdmin();}catch(e){FD.notice('storesNotice',e.message,true);}finally{button.disabled=false;}};
 async function loadBilling(){
-  const data=await FD.api('/api/shop/billing');
+  const selected=billingStore;
+  const data=await FD.api('/api/shop/billing?storeId='+encodeURIComponent(selected));
+  if(selected!==billingStore)return;
   $('billingOutstanding').textContent=FD.money(data.outstandingCents/100);
   $('payoutBeneficiary').value=data.payout?.beneficiary||'';
   $('payoutIban').value=data.payout?.iban||'';
@@ -67,7 +80,7 @@ async function loadBilling(){
   document.querySelectorAll('[data-bill-day]').forEach(b=>b.onclick=async()=>{
     if(!confirm('Να καταχωριστεί δοκιμαστική εξόφληση '+FD.money(Number(b.dataset.billCents)/100)+'; Δεν γίνεται είσπραξη.'))return;
     b.disabled=true;
-    try{await FD.api('/api/admin/shop-settlements',{method:'POST',body:JSON.stringify({day:b.dataset.billDay,expectedCents:Number(b.dataset.billCents),confirmPilot:true})});FD.notice('billingNotice','Η δοκιμαστική εξόφληση καταχωρίστηκε.');}
+    try{await FD.api('/api/admin/shop-settlements',{method:'POST',body:JSON.stringify({storeId:selected,day:b.dataset.billDay,expectedCents:Number(b.dataset.billCents),confirmPilot:true})});FD.notice('billingNotice','Η δοκιμαστική εξόφληση καταχωρίστηκε.');}
     catch(e){FD.notice('billingNotice',e.message,true);}
     finally{await loadBilling().catch(e=>FD.notice('billingNotice',e.message,true));}
   });
@@ -76,7 +89,7 @@ $('billingRefresh').onclick=()=>loadBilling().catch(e=>FD.notice('billingNotice'
 async function changeShopControl(path,body){
   const adminCode=prompt('Επιβεβαίωσε με τον κωδικό Admin.');
   if(!adminCode)return;
-  try{await FD.api('/api/admin/'+path,{method:'PATCH',body:JSON.stringify({...body,adminCode})});FD.notice('billingNotice','Η αλλαγή αποθηκεύτηκε.');await loadBilling();}
+  try{await FD.api('/api/admin/'+path,{method:'PATCH',body:JSON.stringify({...body,storeId:billingStore,adminCode})});FD.notice('billingNotice','Η αλλαγή αποθηκεύτηκε.');await loadBilling();}
   catch(e){FD.notice('billingNotice',e.message,true);}
 }
 $('payoutSave').onclick=()=>changeShopControl('shop-payout',{beneficiary:$('payoutBeneficiary').value,iban:$('payoutIban').value,irisPhone:$('payoutPhone').value,irisBusinessConfirmed:$('payoutIrisConfirmed').checked});
@@ -84,6 +97,7 @@ $('holdSuspend').onclick=()=>changeShopControl('shop-hold',{suspended:true,reaso
 $('holdResume').onclick=()=>changeShopControl('shop-hold',{suspended:false,reason:$('holdReason').value,correctionConfirmed:$('holdCorrection').checked});
 
 async function loadDashboard() {
+  await loadStoreAdmin();
   await loadBilling();
   const [stats, orders, config] = await Promise.all([FD.api('/api/stats'), FD.api('/api/orders'), FD.api('/api/config')]);
   $('active').textContent = stats.activeOrders; $('today').textContent = stats.ordersToday; $('delivered').textContent = stats.deliveredToday;
