@@ -19,5 +19,19 @@ function validateInterest(body,config){
  if(Object.keys(body).some(k=>!['email','region','noticeVersion','consent'].includes(k)))throw Error('Μη επιτρεπόμενο πεδίο.');
  return {kind:'interest',email,region,consentVersion:config.version,consentedAt:new Date().toISOString()};
 }
-function screening(app,evaluate){return app.kind==='interest'?{status:'interest',issues:[],requiresHumanVerification:true,notice:'Εκδήλωση ενδιαφέροντος μόνο. Δεν έχει γίνει αξιολόγηση ή ενεργοποίηση.'}:evaluate(app);}
-module.exports={config,validateInterest,screening};
+function validatePrivacyRequest(body,settings){
+ if(!settings.open)throw Error('Η φόρμα αιτημάτων δεν είναι ακόμη ενεργή.');
+ if(!body||typeof body!=='object'||Array.isArray(body)||body.noticeVersion!==settings.version||body.acknowledged!==true)throw Error('Χρειάζεται επιβεβαίωση της ενημέρωσης.');
+ if(Object.keys(body).some(k=>!['email','requestType','noticeVersion','acknowledged'].includes(k)))throw Error('Μη επιτρεπόμενο πεδίο.');
+ const email=typeof body.email==='string'?body.email.trim().toLowerCase():'';
+ if(!validEmail(email))throw Error('Συμπλήρωσε έγκυρο email.');
+ const allowed=['erase','withdraw','access','rectify'];
+ if(!allowed.includes(body.requestType))throw Error('Επίλεξε είδος αιτήματος.');
+ return {kind:'privacy-request',email,requestType:body.requestType,consentVersion:settings.version,consentedAt:new Date().toISOString()};
+}
+function screening(app,evaluate){
+ if(app.kind==='interest')return {status:'interest',issues:[],requiresHumanVerification:true,notice:'Εκδήλωση ενδιαφέροντος μόνο. Δεν έχει γίνει αξιολόγηση ή ενεργοποίηση.'};
+ if(app.kind==='privacy-request')return {status:'privacy-request',issues:[],requiresHumanVerification:true,notice:'Αίτημα δικαιώματος. Απαιτείται επιβεβαίωση ταυτότητας πριν γίνει πρόσβαση, αλλαγή ή διαγραφή. Δεν γίνεται αυτοματοποιημένη ενέργεια.'};
+ return evaluate(app);
+}
+module.exports={config,validateInterest,validatePrivacyRequest,screening};
