@@ -61,6 +61,7 @@ function drawShopMap(orders, drivers, storeLocation) {
 }
 async function loadOrders() {
   const [r, driverResponse, config, billing] = await Promise.all([FD.api('/api/orders'), FD.api('/api/shop/riders'), FD.api('/api/config'), FD.api('/api/shop/billing')]);
+  $('storeTitle').textContent=config.store?.name||'Κατάστημα';
   $('shopBillingOutstanding').textContent=FD.money(billing.outstandingCents/100);
   $('shopPayoutInfo').textContent=billing.payout?(billing.payout.beneficiary+' · '+(billing.payout.iban?'IBAN: '+billing.payout.iban:'')+(billing.payout.irisPhone?' · IRIS: '+billing.payout.irisPhone:'')):'Δεν έχουν οριστεί στοιχεία εξόφλησης.';
   FD.notice('shopHoldNotice',billing.hold.suspended?'Αναστολή νέων παραγγελιών: '+billing.hold.reason+' · Επικοινώνησε με τον διαχειριστή για διευκρινίσεις ή εξόφληση.':'',billing.hold.suspended);
@@ -83,7 +84,7 @@ async function loadOrders() {
   if (!shopMap) initShopMap(config.storeLocation); drawShopMap(orders, currentDrivers, config.storeLocation);
   await loadShopProducts();
 }
-async function enter() { try { await FD.login('shop', $('code').value); $('login').classList.add('hidden'); $('app').classList.remove('hidden'); await loadOrders(); setInterval(() => loadOrders().catch(() => {}), 8000); } catch (e) { FD.notice('loginMsg', e.message, true); } }
+async function enter() { try { await FD.login('shop', $('code').value,{storeId:$('storeId').value.trim()||'default'}); $('login').classList.add('hidden'); $('app').classList.remove('hidden'); await loadOrders(); setInterval(() => loadOrders().catch(() => {}), 8000); } catch (e) { FD.notice('loginMsg', e.message, true); } }
 $('loginBtn').onclick = enter;
 $('createRider').onclick = async () => { try { const name = $('riderName').value.trim(); const r = await FD.api('/api/shop/riders', { method: 'POST', body: JSON.stringify({ name }) }); $('riderName').value = ''; FD.notice('riderCodeNotice', `Οδηγός: ${r.rider.name} · ID: ${r.rider.id}
 Προσωπικός κωδικός (εμφανίζεται μόνο τώρα): ${r.accessCode}`); await loadOrders(); } catch (e) { FD.notice('riderCodeNotice', e.message, true); } };
