@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 let chatHistory = [];
 const COURIER_STATUS_LABELS={
   'new':'Νέα αίτηση','contacted':'Έγινε επικοινωνία','needs-documents':'Εκκρεμούν δικαιολογητικά',
-  'reviewing':'Εξετάζεται','not-suitable':'Δεν προχωρά (απόφαση διαχειριστή)'
+  'reviewing':'Εξετάζεται','not-suitable':'Δεν προχωρά (απόφαση διαχειριστή)','resolved':'Ολοκληρώθηκε'
 };
 async function loadCourierApplications(){
   const data=await FD.api('/api/admin/courier-applications');
@@ -16,16 +16,19 @@ async function loadCourierApplications(){
     const findings=app.screening?.issues||[];
     const ready=app.screening?.status==='ready-for-review';
     const interest=app.kind==='interest';
+    const privacy=app.kind==='privacy-request';
+    const rightsLabels={withdraw:'Ανάκληση συγκατάθεσης',erase:'Διαγραφή',access:'Πρόσβαση',rectify:'Διόρθωση'};
+    const choices=privacy?Object.fromEntries(Object.entries(COURIER_STATUS_LABELS).filter(([key])=>['new','reviewing','contacted','resolved'].includes(key))):COURIER_STATUS_LABELS;
     return `<article class="candidate-card" data-candidate="${FD.esc(app.id)}">
-      <div class="row"><h3>${FD.esc(interest?'Νέα εκδήλωση ενδιαφέροντος':app.fullName)}</h3><span class="status ${ready?'good':'wait'}">${interest?'Λίστα ενδιαφέροντος':ready?'Προέλεγχος πλήρης':'Εκκρεμότητες'}</span></div>
-      <p class="candidate-contact"><a href="mailto:${FD.esc(app.email)}">${FD.esc(app.email)}</a>${interest?'':` · <a href="tel:${FD.esc(app.phone)}">${FD.esc(app.phone)}</a>`}</p>
-      ${interest?`<p class="small muted">Περιοχή: ${FD.esc(app.region||'—')} · Δήλωση: ${new Date(app.createdAt).toLocaleString('el-GR')}</p><p class="hint">Δεν ζητήθηκαν δικαιολογητικά. Δεν έχει δημιουργηθεί λογαριασμός.</p>`:`<p class="small muted">Περιοχή: ${FD.esc(app.region)} · Μέσο: ${FD.esc(({bicycle:'Ποδήλατο',moped:'Μοτοποδήλατο',motorcycle:'Μοτοσικλέτα',car:'Αυτοκίνητο'})[app.vehicle]||app.vehicle)} · Κατηγορία: ${FD.esc(app.licenseCategory)}</p>
+      <div class="row"><h3>${FD.esc(privacy?'Αίτημα προστασίας δεδομένων':interest?'Νέα εκδήλωση ενδιαφέροντος':app.fullName)}</h3><span class="status ${ready?'good':'wait'}">${privacy?'Αίτημα δικαιωμάτων':interest?'Λίστα ενδιαφέροντος':ready?'Προέλεγχος πλήρης':'Εκκρεμότητες'}</span></div>
+      <p class="candidate-contact"><a href="mailto:${FD.esc(app.email)}">${FD.esc(app.email)}</a>${interest||privacy?'':` · <a href="tel:${FD.esc(app.phone)}">${FD.esc(app.phone)}</a>`}</p>
+      ${privacy?`<p class="small muted">Αίτημα: ${FD.esc(rightsLabels[app.requestType]||'Διαχείριση δεδομένων')} · Υποβλήθηκε: ${new Date(app.createdAt).toLocaleString('el-GR')}</p><p class="hint">Πριν από διαγραφή/αλλαγή/χορήγηση στοιχείων πρέπει να επιβεβαιωθεί η ταυτότητα του αιτούντος. Η διαγραφή αυτού του αιτήματος δεν διαγράφει αυτομάτως προηγούμενη εκδήλωση ενδιαφέροντος.</p>`:interest?`<p class="small muted">Περιοχή: ${FD.esc(app.region||'—')} · Δήλωση: ${new Date(app.createdAt).toLocaleString('el-GR')}</p><p class="hint">Δεν ζητήθηκαν δικαιολογητικά. Δεν έχει δημιουργηθεί λογαριασμός.</p>`:`<p class="small muted">Περιοχή: ${FD.esc(app.region)} · Μέσο: ${FD.esc(({bicycle:'Ποδήλατο',moped:'Μοτοποδήλατο',motorcycle:'Μοτοσικλέτα',car:'Αυτοκίνητο'})[app.vehicle]||app.vehicle)} · Κατηγορία: ${FD.esc(app.licenseCategory)}</p>
       <p class="small muted">Δηλώθηκε: ${new Date(app.createdAt).toLocaleString('el-GR')} · Ασφάλιση έως: ${FD.esc(app.insuranceUntil||'—')}</p>
       <p class="small muted">Δηλώνει επαγγελματική δραστηριότητα: ${app.businessActive?'Ναι':'Όχι'} · Παραστατικά: ${app.canInvoice?'Ναι':'Όχι'} · Εξοπλισμός: ${app.equipmentReady?'Ναι':'Όχι'}</p>
       ${findings.length?`<strong class="warning">Σημεία προς επαλήθευση</strong><ul class="candidate-issues">${findings.map(issue=>`<li>${FD.esc(issue)}</li>`).join('')}</ul>`:'<p class="small muted">Δεν εντοπίστηκαν ελλείψεις στα δηλωμένα στοιχεία. Απαιτείται εξέταση εγγράφων.</p>'}`}
-      <div class="field"><label>Κατάσταση ανθρώπινου ελέγχου</label><select data-candidate-status>${Object.entries(COURIER_STATUS_LABELS).map(([value,label])=>`<option value="${value}" ${value===app.status?'selected':''}>${label}</option>`).join('')}</select></div>
+      <div class="field"><label>Κατάσταση ανθρώπινου ελέγχου</label><select data-candidate-status>${Object.entries(choices).map(([value,label])=>`<option value="${value}" ${value===app.status?'selected':''}>${label}</option>`).join('')}</select></div>
       <div class="field"><label>Σημειώσεις διαχειριστή (έως 500 χαρακτήρες)</label><textarea data-candidate-notes maxlength="500" rows="2">${FD.esc(app.reviewNotes||'')}</textarea></div>
-      <div class="actions"><button type="button" data-candidate-save>Αποθήκευση ελέγχου</button><button type="button" class="secondary" data-candidate-delete>Διαγραφή αίτησης</button></div>
+      <div class="actions"><button type="button" data-candidate-save>Αποθήκευση ελέγχου</button><button type="button" class="secondary" data-candidate-delete>${privacy?'Διαγραφή αιτήματος':'Διαγραφή αίτησης'}</button></div>
     </article>`;
   }).join(''):'<p class="hint">Δεν υπάρχουν ακόμη δηλώσεις ενδιαφέροντος ή αιτήσεις.</p>';
   node.querySelectorAll('[data-candidate-save]').forEach(button=>button.addEventListener('click',async()=>{
