@@ -24,7 +24,7 @@ async function installSnapshot(db,snapshot){
   await client.query('CREATE TABLE IF NOT EXISTS fair_delivery_state (id INTEGER PRIMARY KEY CHECK (id = 1), body JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())');
   const previous=await client.query('SELECT id FROM fair_delivery_state LIMIT 1 FOR UPDATE');
   if(previous.rows.length)throw Error('Η βάση προορισμού περιέχει ήδη μητρώο. Καμία αντικατάσταση δεν επιτρέπεται.');
-  // One-row inserts and an advisory lock prevent accidental concurrent import.
+  // The unique id=1 constraint and ON CONFLICT protect against concurrent imports.
   const result=await client.query('INSERT INTO fair_delivery_state (id, body) VALUES (1,$1::jsonb) ON CONFLICT DO NOTHING RETURNING id',[serialized]);
   if(result.rowCount!==1)throw Error('Η εισαγωγή δεν πραγματοποιήθηκε επειδή η βάση δεν είναι κενή.');
   const verified=await client.query('SELECT body FROM fair_delivery_state WHERE id = 1');
