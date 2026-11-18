@@ -4,6 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
 const { validateApplication, evaluateApplication, pruneApplications } = require('./courier-onboarding');
 
 // Tiny .env reader: no dependency needed. Real environment variables win.
@@ -66,7 +67,8 @@ function normalizeState(parsed = {}) {
     orders: Array.isArray(parsed.orders) ? parsed.orders : [],
     riders: parsed.riders && typeof parsed.riders === 'object' ? parsed.riders : {},
     shopCredential: parsed.shopCredential || null,
-    courierApplications: pruneApplications(parsed.courierApplications)
+    courierApplications: pruneApplications(parsed.courierApplications),
+    customers: parsed.customers && typeof parsed.customers === 'object' && !Array.isArray(parsed.customers) ? parsed.customers : {}
   };
 }
 
@@ -78,6 +80,7 @@ function publicOrder(order) {
     id: order.id, items: order.items, subtotal: order.subtotal, serviceFee: order.serviceFee,
     deliveryFee: order.deliveryFee || 0,
     total: order.total, status: order.status, createdAt: order.createdAt, updatedAt: order.updatedAt,
+    paymentMethod: order.paymentMethod || 'cash', paymentStatus: order.paymentStatus || 'pilot_not_charged', paymentMode: 'simulation', paymentCollected: false,
     estimatedKm: order.estimatedKm ?? null, badWeather: Boolean(order.badWeather),
     riderPayEstimate: order.riderPayEstimate ?? null,
     deliveryLocation: order.deliveryLocation || null,
@@ -245,7 +248,7 @@ function parseCookies(header = '') {
 
 function getSession(req, roleHint) {
   const cookies = parseCookies(req.headers.cookie || '');
-  const roles = ['admin', 'shop', 'rider'];
+  const roles = ['admin', 'shop', 'rider', 'customer'];
   const ordered = roles.includes(roleHint) ? [roleHint] : roles;
   for (const role of ordered) {
     const token = cookies[`fd_${role}_session`];
@@ -408,6 +411,69 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { application: { ...app, screening: evaluateApplication(app) } });
   }
 
+
+  // Pilot customer accounts use an alias and a test password; no actual bank data
+  // or email is collected. Commercial signup requires a separate verified flow.
+  if (pathname === '/api/customer/account' && method === 'GET') {
+    const session = getSession(req, 'customer');
+    return sendJson(res, 200, { account: publicAccount(session ? state.customers[session.userId] : null), pilot: true, realPaymentsEnabled: false });
+  }
+  if (method === 'GET' && pathname === '/api/customer/orders') {
+    const session = requireRole(req, res, ['customer']); if (!session) return;
+    if (!state.customers[session.userId]) return sendJson(res, 401, { error: 'Ο λογαριασμός δεν είναι ενεργός.' });
+    return sendJson(res, 200, { orders: state.orders.filter(o => o.customerId === session.userId).sort((a,b) => b.createdAt.localeCompare(a.createdAt)).map(publicOrder) });
+  }
+  if (method === 'POST' && ['/api/customer/register','/api/customer/login'].includes(pathname)) {
+    const origin = req.headers.origin;
+    if (origin && origin !== 'https://' + req.headers.host && origin !== 'http://' + req.headers.host) return sendJson(res, 403, { error: 'Μη επιτρεπόμενη προέλευση.' });
+    if (!rateLimit(authWindows, 'customer:' + clientIp(req), 12, 15 * 60_000)) return sendJson(res, 429, { error: 'Πολλές προσπάθειες. Δοκίμασε αργότερα.' });
+    const body = await readJson(req, 2048);
+    let input;
+    try { input = customerCredentials(body); } catch (error) { return sendJson(res, 400, {error:error.message}); }
+    let account = Object.values(state.customers).find(a => a.alias === input.alias);
+    if (pathname.endsWith('/register')) {
+      if (body.pilotAcknowledged !== true) return sendJson(res,400,{error:'Επιβεβαίωσε ότι χρησιμοποιείς μόνο δοκιμαστικά στοιχεία.'});
+      if (account) return sendJson(res,409,{error:'Το δοκιμαστικό όνομα χρησιμοποιείται ήδη.'});
+      if (Object.keys(state.customers).length >= 200) return sendJson(res,503,{error:'Το πιλοτικό μητρώο έχει συμπληρωθεί.'});
+      const salt=crypto.randomBytes(16).toString('hex');
+      const hash=await riderCodeHash(input.password,salt);
+      // Recheck after async hashing to prevent simultaneous duplicate registration.
+      if (Object.values(state.customers).some(a => a.alias === input.alias)) return sendJson(res,409,{error:'Το δοκιμαστικό όνομα χρησιμοποιείται ήδη.'});
+      if (Object.keys(state.customers).length >= 200) return sendJson(res,503,{error:'Το πιλοτικό μητρώο έχει συμπληρωθεί.'});
+      account=newAccount(input.alias,hash,salt);
+      state.customers[account.id]=account;
+      await persistState();
+    } else {
+      const hash=await riderCodeHash(input.password,account?.salt || 'fd-dummy-login-salt');
+      if (!account || !safeEqual(hash,account.passwordHash)) return sendJson(res,401,{error:'Λάθος όνομα ή κωδικός.'});
+    }
+    const prior=getSession(req,'customer');
+    if(prior) sessions.delete(prior.token);
+    const token=crypto.randomBytes(32).toString('hex');
+    sessions.set(token,{role:'customer',userId:account.id,expiresAt:Date.now()+SESSION_TTL_MS});
+    const secure=process.env.NODE_ENV==='production'||process.env.RENDER?'; Secure':'';
+    return sendJson(res,200,{account:publicAccount(account)},{'Set-Cookie':`fd_customer_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS/1000}${secure}`});
+  }
+  if (method === 'POST' && pathname === '/api/customer/logout') {
+    const customer=getSession(req,'customer');
+    if(customer) sessions.delete(customer.token);
+    return sendJson(res,200,{ok:true},{'Set-Cookie':'fd_customer_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'});
+  }
+  if (method === 'DELETE' && pathname === '/api/customer/account') {
+    const session=requireRole(req,res,['customer']); if(!session)return;
+    const account=state.customers[session.userId];
+    if(!account)return sendJson(res,404,{error:'Δεν υπάρχει λογαριασμός.'});
+    const body=await readJson(req,2048);
+    if(body.confirmDelete!==true||typeof body.password!=='string'||body.password.length>128)return sendJson(res,400,{error:'Χρειάζεται επιβεβαίωση και κωδικός.'});
+    if(!rateLimit(authWindows,'customer-delete:'+clientIp(req),6,15*60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες.'});
+    if(!safeEqual(await riderCodeHash(body.password,account.salt),account.passwordHash))return sendJson(res,401,{error:'Λάθος κωδικός.'});
+    delete state.customers[account.id];
+    for(const [token,old] of sessions)if(old.role==='customer'&&old.userId===account.id)sessions.delete(token);
+    for(const order of state.orders)if(order.customerId===account.id){delete order.customerId;order.trackingPrivate=true;}
+    await persistState();
+    return sendJson(res,200,{deleted:true},{'Set-Cookie':'fd_customer_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'});
+  }
+
   if (method === 'POST' && pathname === '/api/auth/login') {
     if (!rateLimit(authWindows, clientIp(req), 20, 15 * 60_000)) return sendJson(res, 429, { error: 'Πολλές προσπάθειες σύνδεσης. Δοκίμασε ξανά αργότερα.' });
     const body = await readJson(req, 4096);
@@ -522,6 +588,10 @@ async function handleApi(req, res, url) {
     const ip = clientIp(req);
     if (!rateLimit(requestWindows, `orders:${ip}`, 10, 60_000)) return sendJson(res, 429, { error: 'Πολλές δοκιμαστικές παραγγελίες. Περίμενε ένα λεπτό.' });
     const body = await readJson(req, 12 * 1024);
+    const customerSession = getSession(req, 'customer');
+    const customerAccount = customerSession ? state.customers[customerSession.userId] : null;
+    let payment;
+    try { payment = checkoutPayment(body, customerAccount); } catch (error) { return sendJson(res, error.statusCode || 400, {error:error.message}); }
     if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 30) return sendJson(res, 400, { error: 'Το καλάθι δεν είναι έγκυρο.' });
 
     const customerName = String(body.customerName || '').trim();
@@ -549,6 +619,7 @@ async function handleApi(req, res, url) {
     const subtotal = round2(lines.reduce((sum, line) => sum + line.lineTotal, 0));
     const order = {
       id: crypto.randomUUID(), storeId: 'default', items: lines, subtotal,
+      ...payment, customerId: customerAccount?.id || null, trackingPrivate: Boolean(customerAccount),
       customerName, customerPhone, deliveryAddress,
       deliveryLocation: { lat: deliveryLat, lng: deliveryLng },
       serviceFee: round2(state.settings.customerServiceFee), deliveryFee: round2(state.settings.shopDeliveryFee),
@@ -564,6 +635,13 @@ async function handleApi(req, res, url) {
   const publicTracking = pathname.match(/^\/api\/orders\/([0-9a-f-]+)$/i);
   if (method === 'GET' && publicTracking) {
     const order = state.orders.find(item => item.id === publicTracking[1]);
+    if (order && (order.customerId || order.trackingPrivate)) {
+      const customer=getSession(req,'customer');
+      const role=String(req.headers['x-fd-role']||'');
+      const staff=['admin','shop','rider'].includes(role)?getSession(req,role):null;
+      const staffAllowed=staff && (staff.role==='admin'||(staff.role==='shop'&&(order.storeId||'default')===staff.storeId)||(staff.role==='rider'&&order.assignedRider===staff.userId));
+      if (!(customer && order.customerId && customer.userId===order.customerId) && !staffAllowed) return sendJson(res,404,{error:'Η παραγγελία δεν βρέθηκε.'});
+    }
     return order ? sendJson(res, 200, { order: publicOrder(order) }) : sendJson(res, 404, { error: 'Η παραγγελία δεν βρέθηκε.' });
   }
 
@@ -888,7 +966,7 @@ async function serveRoleApp(req, res, url) {
 }
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
-const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js']);
+const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js', 'customer-account.js']);
 async function serveStatic(req, res, url) {
   let requested = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
   if (!PUBLIC_FILES.has(requested)) return sendJson(res, 404, { error: 'Η σελίδα δεν βρέθηκε.' });
