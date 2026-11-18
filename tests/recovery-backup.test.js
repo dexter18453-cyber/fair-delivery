@@ -41,9 +41,17 @@ test('recovery is one-time, password rotation revokes sessions, backups require 
  const backup={adminCode:'demo',passphrase:phrase,confirm:true};
  await call('/api/admin/backup','customer',second,'POST',backup,401);
  await call('/api/admin/backup','admin',admin,'POST',{...backup,adminCode:'wrong'},403);
+ const report=(await call('/api/admin/storage/verify','admin',admin)).data;
+ assert.equal(report.stored,true);assert.equal(report.storage,'temporary-file');
+ assert.equal(report.counts.customers,1);
+ assert.match(report.integritySha256,/^[a-f0-9]{64}$/);
+ await call('/api/admin/storage/verify','shop',admin,'GET',undefined,401);
  const file=(await call('/api/admin/backup','admin',admin,'POST',backup)).data;
  const snapshot=await decryptBackup(file,phrase);
  const account=Object.values(snapshot.customers).find(a=>a.alias===alias);
+ const {validateSnapshot}=require('../migration-tools');
+ assert.equal(validateSnapshot(snapshot).digest,report.integritySha256);
+
  assert.ok(account);assert.equal(account.recoveryHash,undefined);assert.notEqual(account.passwordHash,third);assert.ok(!JSON.stringify(snapshot).includes(phrase));
  }finally{child.kill('SIGTERM');await new Promise(r=>setTimeout(r,150));fs.rmSync(dir,{recursive:true,force:true});}
 });
