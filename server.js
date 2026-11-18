@@ -4,6 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const courierInterest=require('./courier-interest');
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
 const {paymentDetails,shopHold,initialPayout,visiblePayout}=require('./shop-controls');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
@@ -346,6 +347,27 @@ async function handleApi(req, res, url) {
   // Freelancer onboarding remains separate from shop-employed riders and dispatch accounts.
   // Live intake is gated until the operator has published a complete privacy notice,
   // secured a lawful basis, and reviewed operating/legal obligations.
+  if(method==='GET'&&pathname==='/api/courier-interest/config'){
+    return sendJson(res,200,courierInterest.config(process.env,DEMO_MODE));
+  }
+  if(method==='POST'&&pathname==='/api/courier-interest'){
+    const config=courierInterest.config(process.env,DEMO_MODE);
+    if(!config.open)return sendJson(res,503,{error:'Οι εκδηλώσεις ενδιαφέροντος ανοίγουν σύντομα.'});
+    const origin=req.headers.origin;
+    if(origin&&origin!=='http://'+req.headers.host&&origin!=='https://'+req.headers.host)return sendJson(res,403,{error:'Μη επιτρεπόμενη προέλευση.'});
+    if(!rateLimit(requestWindows,'courier-interest:'+clientIp(req),5,60*60_000))return sendJson(res,429,{error:'Δοκίμασε ξανά αργότερα.'});
+    const body=await readJson(req,2048);
+    let interest;try{interest=courierInterest.validateInterest(body,config);}catch(e){return sendJson(res,400,{error:e.message});}
+    state.courierApplications=pruneApplications(state.courierApplications);
+    const response={received:true,message:'Ευχαριστούμε! Η εκδήλωση ενδιαφέροντος καταχωρίστηκε. Θα επικοινωνήσουμε μαζί σου όταν υπάρχουν επόμενα βήματα. Δεν δημιουργήθηκε λογαριασμός.'};
+    if(state.courierApplications.some(a=>a.email===interest.email&&a.kind==='interest'))return sendJson(res,202,response);
+    if(state.courierApplications.length>=300)return sendJson(res,503,{error:'Οι θέσεις ενδιαφέροντος συμπληρώθηκαν προσωρινά.'});
+    const entry={...interest,id:crypto.randomUUID(),createdAt:nowIso(),updatedAt:nowIso(),status:'new',reviewNotes:'',reviewedAt:null};
+    state.courierApplications.push(entry);
+    try{await persistState();}catch(e){state.courierApplications=state.courierApplications.filter(a=>a.id!==entry.id);throw e;}
+    return sendJson(res,202,response);
+  }
+
   if (method === 'GET' && pathname === '/api/courier-applications/config') {
     return sendJson(res, 200, {
       open: DEMO_MODE || process.env.COURIER_APPLICATIONS_OPEN === 'true',
@@ -390,7 +412,7 @@ async function handleApi(req, res, url) {
     clearExpiredCourierApplications();
     return sendJson(res, 200, {
       applications: state.courierApplications.map(app => ({
-        ...app, screening: evaluateApplication(app)
+        ...app, screening: courierInterest.screening(app,evaluateApplication)
       })).sort((a,b) => b.createdAt.localeCompare(a.createdAt)),
       policies: { automaticApproval: false, retentionDays: 90, includesSensitiveDocuments: false }
     });
@@ -416,7 +438,7 @@ async function handleApi(req, res, url) {
     app.reviewedAt = nowIso();
     app.updatedAt = nowIso();
     await persistState();
-    return sendJson(res, 200, { application: { ...app, screening: evaluateApplication(app) } });
+    return sendJson(res, 200, { application: { ...app, screening: courierInterest.screening(app,evaluateApplication) } });
   }
 
 
@@ -1017,7 +1039,7 @@ async function serveRoleApp(req, res, url) {
 }
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
-const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js', 'customer-account.js']);
+const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js', 'courier-interest.js', 'courier-qualification.html', 'customer-account.js']);
 async function serveStatic(req, res, url) {
   let requested = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
   if (!PUBLIC_FILES.has(requested)) return sendJson(res, 404, { error: 'Η σελίδα δεν βρέθηκε.' });
