@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 let products = []; let cart = new Map(); let currentOrderId = null; let trackingTimer = null;
 let serviceFee = 0; let deliveryFee = 0; let submitting = false; let acceptingOrders=true; let selectedStore='default'; let storeLoading=false;
 let minOrder=0, storeRadius=null,storePoint=null;
+let pendingCheckout=null;
 let deliveryMap = null; let deliveryMarker = null; let trackingMap = null; let trackingLayers = [];
 const DEFAULT_CENTER = [37.97, 23.67];
 function renderCart() {
@@ -21,7 +22,7 @@ function renderCart() {
   document.querySelectorAll('[data-plus]').forEach(b => b.onclick = () => changeQty(b.dataset.plus, 1));
   document.querySelectorAll('[data-minus]').forEach(b => b.onclick = () => changeQty(b.dataset.minus, -1));
 }
-function changeQty(id, delta) { const qty = (cart.get(id) || 0) + delta; if (qty <= 0) cart.delete(id); else cart.set(id, Math.min(qty, 20)); renderCart(); }
+function changeQty(id, delta) { if(submitting||pendingCheckout)return; const qty = (cart.get(id) || 0) + delta; if (qty <= 0) cart.delete(id); else cart.set(id, Math.min(qty, 20)); renderCart(); }
 function checkCoverage(){
   if(storeRadius===null){$('coverageNote').textContent='';return true;}
   const lat=Number($('deliveryCoords').dataset.lat),lng=Number($('deliveryCoords').dataset.lng);
@@ -81,7 +82,7 @@ async function loadProducts() {
       renderFilteredProducts();
     });
   }
-  $('productSearch')?.addEventListener('input',renderFilteredProducts);
+  if($('productSearch'))$('productSearch').oninput=renderFilteredProducts;
   renderFilteredProducts();
   $('feeNote').textContent = `Χωρίς χρέωση Fair Delivery στον πελάτη. Διανομή καταστήματος: ${FD.money(deliveryFee)}. Πληρωμή απευθείας στο κατάστημα στην πραγματική λειτουργία.`;
 }
@@ -98,9 +99,27 @@ $('placeOrder').addEventListener('click', async () => {
     if (paymentMethod && !$('confirmSimulation').checked) { FD.notice('notice','Επιβεβαίωσε ότι η πληρωμή είναι δοκιμαστική.',true); return; }
     submitting = true; renderCart();
     const items = [...cart].map(([productId, qty]) => ({ productId, qty }));
-    const result = await FD.api('/api/orders', { method: 'POST', body: JSON.stringify({ storeId:selectedStore, items, customerName: $('customerName').value.trim(), customerPhone: $('customerPhone').value.trim(), deliveryAddress: $('deliveryAddress').value.trim(), deliveryLocation: { lat, lng }, privacyConsent: true, ...(paymentMethod ? {paymentMethod, confirmPaymentSimulation: true} : {}) }) });
+    const body={storeId:selectedStore,items,customerName:$('customerName').value.trim(),customerPhone:$('customerPhone').value.trim(),deliveryAddress:$('deliveryAddress').value.trim(),deliveryLocation:{lat,lng},privacyConsent:true,...(paymentMethod?{paymentMethod,confirmPaymentSimulation:true}:{})};
+    const account=window.FDAccount?.current();
+    if(account){
+      body.quote={deliveryCents:Math.round(deliveryFee*100),items:items.map(row=>({productId:row.productId,unitCents:Math.round((products.find(p=>p.id===row.productId)?.price??-1)*100)}))};
+      const fingerprint=JSON.stringify(body);
+      if(pendingCheckout&&(pendingCheckout.accountId!==account.id||pendingCheckout.fingerprint!==fingerprint)){
+        FD.notice('notice','Εκκρεμεί προηγούμενη υποβολή. Έλεγξε το ιστορικό ή επανάφερε τα προηγούμενα στοιχεία και ξαναπάτησε υποβολή.',true);return;
+      }
+      if(!pendingCheckout){if(!window.crypto?.randomUUID)throw Error('Ο browser δεν υποστηρίζει ασφαλή υποβολή. Χρησιμοποίησε ενημερωμένο browser μέσω HTTPS.');pendingCheckout={accountId:account.id,fingerprint,requestId:window.crypto.randomUUID()};}
+      body.requestId=pendingCheckout.requestId;
+    }
+    const result = await FD.api('/api/orders',{method:'POST',body:JSON.stringify(body)});
+    pendingCheckout=null;
     cart.clear(); renderCart(); FD.notice('notice', 'Η πιλοτική παραγγελία καταχωρίστηκε. Δεν έγινε χρέωση.'); window.FDAccount?.refreshOrders().catch(()=>{}); showTracking(result.order.id);
-  } catch (e) { FD.notice('notice', e.message, true); }
+  } catch (e) {
+    if([400,401,403,404,409].includes(e.status)){
+      pendingCheckout=null;
+      if(e.status===409)try{await loadProducts();for(const id of cart.keys())if(!products.some(p=>p.id===id))cart.delete(id);}catch{}
+      FD.notice('notice',e.message+(e.status===409?' Έλεγξε το ενημερωμένο καλάθι πριν ξαναστείλεις.':''),true);
+    }else FD.notice('notice',e.message+(pendingCheckout?' · Αν δεν επιβεβαιώθηκε, ξαναπάτησε υποβολή χωρίς αλλαγές ή έλεγξε το ιστορικό.':''),true);
+  }
   finally { submitting = false; renderCart(); }
 });
 async function loadStores(){
@@ -109,13 +128,13 @@ async function loadStores(){
   select.innerHTML=data.stores.map(s=>`<option value="${FD.esc(s.id)}">${FD.esc(s.name)}${s.acceptingOrders?'':' — προσωρινά κλειστό'}</option>`).join('');
   select.value=selectedStore;
   select.onchange=async()=>{
-    if(submitting||storeLoading){select.value=selectedStore;return;}
+    if(submitting||storeLoading||pendingCheckout){select.value=selectedStore;if(pendingCheckout)FD.notice('notice','Εκκρεμεί προηγούμενη υποβολή. Έλεγξε πρώτα το ιστορικό.',true);return;}
     if(cart.size&&!confirm('Η αλλαγή καταστήματος θα αδειάσει το καλάθι. Συνέχεια;')){select.value=selectedStore;return;}
     selectedStore=select.value;cart.clear();products=[];selectedCategory='Όλα';storeLoading=true;acceptingOrders=false;select.disabled=true;renderCart();renderFilteredProducts();
     try{await loadProducts();}catch(e){FD.notice('shopUnavailable',e.message,true);}finally{storeLoading=false;select.disabled=false;renderCart();}
   };
 }
-$('clearCart').addEventListener('click', () => { cart.clear(); renderCart(); FD.notice('notice', 'Το καλάθι καθαρίστηκε.'); });
+$('clearCart').addEventListener('click', () => { if(submitting||pendingCheckout)return; cart.clear(); renderCart(); FD.notice('notice', 'Το καλάθι καθαρίστηκε.'); });
 $('useLocation').onclick = () => {
   if (!navigator.geolocation) { $('locationNote').textContent = 'Ο browser δεν υποστηρίζει γεωεντοπισμό.'; return; }
   $('locationNote').textContent = 'Αναμονή άδειας τοποθεσίας…';

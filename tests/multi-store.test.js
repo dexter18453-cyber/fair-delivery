@@ -50,7 +50,16 @@ test('multi-store API isolates menus and credentials, order routing and billing'
   const customer=(await call('/api/customer/register','','','POST',{alias:'demo-storetest',password:'synthetic-only-1234',pilotAcknowledged:true})).cookie;
   const contact={customerName:'Synthetic customer',customerPhone:'0000000000',deliveryAddress:'Synthetic address',deliveryLocation:{lat:37.9,lng:23.7},privacyConsent:true,paymentMethod:'cash'};
   await call('/api/orders','customer',customer,'POST',{...contact,storeId:storeA,items:[{productId:pb.id,qty:1}]},400);
-  const order=(await call('/api/orders','customer',customer,'POST',{...contact,storeId:storeA,items:[{productId:pa.id,qty:1}]},201)).data.order;
+  const requestId='2be07789-a53a-4bbb-ae11-3d66cc568bc1';
+  const attempt={...contact,storeId:storeA,items:[{productId:pa.id,qty:1}],requestId,quote:{deliveryCents:100,items:[{productId:pa.id,unitCents:300}]}};
+  await call('/api/orders','customer',customer,'POST',{...attempt,quote:{...attempt.quote,deliveryCents:200}},409);
+  await call('/api/orders','customer',customer,'POST',{...attempt,quote:{...attempt.quote,items:[{productId:pa.id,unitCents:200}]}},409);
+  const order=(await call('/api/orders','customer',customer,'POST',attempt,201)).data.order;
+  const replay=(await call('/api/orders','customer',customer,'POST',attempt,200)).data;
+  assert.equal(replay.order.id,order.id);assert.equal(replay.replayed,true);
+  assert.equal(replay.order.checkoutRequestId,undefined);assert.equal(replay.order.checkoutDigest,undefined);
+  await call('/api/orders','customer',customer,'POST',{...attempt,customerName:'Different synthetic customer'},409);
+  assert.equal((await call('/api/orders','shop',sa)).data.orders.length,1);
   assert.equal(order.total,4);assert.equal(order.storeId,storeA);
   assert.equal(order.etaMin,25);assert.equal(order.etaMax,50);
   const operationSettings=(await call('/api/shop/operations','shop',sa)).data.operations;
