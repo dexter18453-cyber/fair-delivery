@@ -10,6 +10,7 @@ const FD = {
   async login(role, code, extra = {}) { return this.api('/api/auth/login', { method: 'POST', body: JSON.stringify({ role, code, ...extra }) }); },
   async logout(role) { return this.api('/api/auth/logout', { method: 'POST', body: JSON.stringify({ role }), headers: { 'X-FD-Role': role } }); },
   async me(role) { return this.api('/api/auth/me', { headers: role ? { 'X-FD-Role': role } : {} }); },
+  paymentLabel(method) { return ({cash:'Μετρητά',card:'Κάρτα',iris:'IRIS'})[method] || '—'; },
   money(value) { return new Intl.NumberFormat('el-GR', { style: 'currency', currency: 'EUR' }).format(Number(value || 0)); },
   esc(value) { return String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); },
   status(value) { return ({ new: 'Νέα', accepted: 'Αποδεκτή από κατάστημα', ready: 'Έτοιμη για διανομή', assigned: 'Έφυγε για παράδοση', picked_up: 'Παραλήφθηκε', delivered: 'Παραδόθηκε', cancelled: 'Ακυρώθηκε' })[value] || value; },
