@@ -2,6 +2,7 @@
 const $ = id => document.getElementById(id);
 let products = []; let cart = new Map(); let currentOrderId = null; let trackingTimer = null;
 let serviceFee = 0; let deliveryFee = 0; let submitting = false; let acceptingOrders=true; let selectedStore='default'; let storeLoading=false;
+let minOrder=0, storeRadius=null,storePoint=null;
 let deliveryMap = null; let deliveryMarker = null; let trackingMap = null; let trackingLayers = [];
 const DEFAULT_CENTER = [37.97, 23.67];
 function renderCart() {
@@ -14,14 +15,25 @@ function renderCart() {
   $('serviceFee').textContent = FD.money(rows.length ? serviceFee : 0);
   $('deliveryFee').textContent = FD.money(rows.length ? deliveryFee : 0);
   $('total').textContent = FD.money(rows.length ? subtotal + serviceFee + deliveryFee : 0);
-  $('placeOrder').disabled = submitting || storeLoading || !rows.length || !acceptingOrders;
+  $('minimumNotice').textContent=rows.length&&Math.round(subtotal*100)<Math.round(minOrder*100)?'Ελάχιστη αξία προϊόντων: '+FD.money(minOrder):'';
+  const covered=checkCoverage();
+  $('placeOrder').disabled = submitting || storeLoading || !rows.length || !acceptingOrders || Math.round(subtotal*100)<Math.round(minOrder*100) || !covered;
   document.querySelectorAll('[data-plus]').forEach(b => b.onclick = () => changeQty(b.dataset.plus, 1));
   document.querySelectorAll('[data-minus]').forEach(b => b.onclick = () => changeQty(b.dataset.minus, -1));
 }
 function changeQty(id, delta) { const qty = (cart.get(id) || 0) + delta; if (qty <= 0) cart.delete(id); else cart.set(id, Math.min(qty, 20)); renderCart(); }
+function checkCoverage(){
+  if(storeRadius===null){$('coverageNote').textContent='';return true;}
+  const lat=Number($('deliveryCoords').dataset.lat),lng=Number($('deliveryCoords').dataset.lng);
+  if(!Number.isFinite(lat)||!Number.isFinite(lng)||!storePoint){$('coverageNote').textContent='Επίλεξε σημείο για έλεγχο ακτίνας διανομής.';return false;}
+  const rad=x=>x*Math.PI/180;const dlat=rad(lat-storePoint.lat),dlon=rad(lng-storePoint.lng);const h=Math.sin(dlat/2)**2+Math.cos(rad(storePoint.lat))*Math.cos(rad(lat))*Math.sin(dlon/2)**2;
+  const km=6371*2*Math.asin(Math.min(1,Math.sqrt(h)));const ok=km<=storeRadius;
+  $('coverageNote').textContent=ok?'Εντός ακτίνας διανομής.':'Εκτός ακτίνας διανομής του καταστήματος.';return ok;
+}
 function setDeliveryPoint(lat, lng) {
   $('deliveryCoords').textContent = `Σημείο παράδοσης: ${lat.toFixed(5)}, ${lng.toFixed(5)}`;
   $('deliveryCoords').dataset.lat = String(lat); $('deliveryCoords').dataset.lng = String(lng);
+  renderCart();
   if (!deliveryMap || !window.L) return;
   if (!deliveryMarker) deliveryMarker = L.marker([lat, lng]).addTo(deliveryMap).bindPopup('Σημείο παράδοσης');
   else deliveryMarker.setLatLng([lat, lng]);
@@ -54,6 +66,9 @@ async function loadProducts() {
   const [menu, config] = await Promise.all([FD.api('/api/products'+suffix), FD.api('/api/config'+suffix)]); products = menu.products;
   $('cartStoreName').textContent=config.store?.name||'Πρώτο κατάστημα';
   acceptingOrders=config.acceptingOrders!==false;
+  minOrder=config.store?.minOrder??0;storeRadius=config.store?.radiusKm??null;storePoint=config.storeLocation||null;
+  const reason={draft:'Σε προετοιμασία',paused:'Προσωρινά κλειστό',suspended:'Προσωρινά κλειστό',outside_hours:'Εκτός ωραρίου'};
+  $('storeAvailability').textContent=acceptingOrders?'Ανοιχτό · '+(config.store?.etaMin??25)+'–'+(config.store?.etaMax??50)+' λεπτά'+(minOrder?' · Ελάχιστη '+FD.money(minOrder):''):(reason[config.store?.reason]||'Προσωρινά κλειστό');
   FD.notice('shopUnavailable',acceptingOrders?'':'Το κατάστημα δεν δέχεται προσωρινά νέες παραγγελίες.',!acceptingOrders);
   serviceFee = Number(config.settings.customerServiceFee);
   deliveryFee = Number(config.settings.shopDeliveryFee || 0);
@@ -71,7 +86,7 @@ async function loadProducts() {
   $('feeNote').textContent = `Χωρίς χρέωση Fair Delivery στον πελάτη. Διανομή καταστήματος: ${FD.money(deliveryFee)}. Πληρωμή απευθείας στο κατάστημα στην πραγματική λειτουργία.`;
 }
 $('placeOrder').addEventListener('click', async () => {
-  if (submitting || storeLoading || !acceptingOrders) return;
+  if (submitting || storeLoading || !acceptingOrders || !checkCoverage()) return;
   try {
     const lat = Number($('deliveryCoords').dataset.lat); const lng = Number($('deliveryCoords').dataset.lng);
     if (!$('customerName').value.trim() || !$('customerPhone').value.trim() || !$('deliveryAddress').value.trim() || !Number.isFinite(lat) || !Number.isFinite(lng)) {
@@ -124,6 +139,7 @@ async function refreshTracking() {
     const r = await FD.api(`/api/orders/${encodeURIComponent(currentOrderId)}`); const o = r.order;
     $('orderStatus').textContent = FD.status(o.status); $('orderStatus').className = 'status ' + (o.status === 'delivered' ? 'good' : o.status === 'cancelled' ? 'bad' : 'wait');
     $('trackingInfo').textContent = `Σύνολο ${FD.money(o.total)} · Δημιουργήθηκε ${new Date(o.createdAt).toLocaleString('el-GR')}${o.paymentMethod ? ' · '+({cash:'Μετρητά',card:'Κάρτα',iris:'IRIS'}[o.paymentMethod]||'—')+' · Δοκιμή χωρίς πληρωμή' : ''}`;
+    if(o.etaMin!=null&&o.etaMax!=null&&!['delivered','cancelled'].includes(o.status))$('trackingInfo').textContent+=' · Αρχική εκτίμηση '+o.etaMin+'–'+o.etaMax+' λεπτά';
     $('trackingCoords').textContent = o.riderLocation ? 'Εμφανίζεται η τελευταία θέση που κοινοποίησε ο διανομέας.' : 'Δεν έχει κοινοποιηθεί ακόμη θέση διανομέα.';
     renderTrackingMap(o);
     if (['delivered', 'cancelled'].includes(o.status) && trackingTimer) { clearInterval(trackingTimer); trackingTimer = null; }

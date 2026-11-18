@@ -72,7 +72,7 @@ async function loadBilling(){
   $('payoutIban').value=data.payout?.iban||'';
   $('payoutPhone').value=data.payout?.irisPhone||data.payout?.pendingIrisPhone||'';
   $('payoutIrisConfirmed').checked=Boolean(data.payout?.irisPhone);
-  $('holdStatus').textContent=data.hold.suspended?'Σε αναμονή: '+data.hold.reason:'Ενεργό — δέχεται παραγγελίες';
+  $('holdStatus').textContent=data.hold.suspended?'Σε αναμονή: '+data.hold.reason:'Χωρίς αναστολή οφειλών — ισχύει το ωράριο καταστήματος';
   $('holdSuspend').disabled=data.hold.suspended||!data.outstandingCents;
   $('holdResume').disabled=!data.hold.suspended;
   $('holdHistory').innerHTML=data.holdHistory.slice().reverse().map(h=>`<p class="hint">${FD.esc(new Date(h.changedAt).toLocaleString('el-GR'))} · ${h.suspended?'Αναστολή':'Επανενεργοποίηση'} · ${FD.esc(h.reason)}</p>`).join('');
