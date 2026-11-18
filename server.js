@@ -14,6 +14,7 @@ const accountRecovery=require('./account-recovery');
 const verifiedCustomers=require('./verified-customers');
 const emailOperations=new Set();
 const encryptedBackup=require('./encrypted-backup');
+const migrationTools=require('./migration-tools');
 const credentialChanges=new Set();
 let backupBusy=false;
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
@@ -200,6 +201,7 @@ async function initState() {
 }
 
 function clearExpiredCourierApplications() {
+  if(process.env.FD_MAINTENANCE_MODE==='true')return;
   if (!state || !Array.isArray(state.courierApplications)) return;
   const remaining = pruneApplications(state.courierApplications);
   const challenges=verifiedCustomers.prune(state.emailChallenges);
@@ -355,9 +357,15 @@ function offlineHelp(question) {
 async function handleApi(req, res, url) {
   const pathname = url.pathname;
   const method = req.method;
+  const maintenance=process.env.FD_MAINTENANCE_MODE==='true';
+  // Manual freeze for a final consistent export. No order/account/shop writes
+  // while this mode is enabled, including legacy guest APIs.
+  if(maintenance&&!['GET','HEAD'].includes(method)&&!(method==='POST'&&['/api/auth/login','/api/admin/backup'].includes(pathname))){
+    return sendJson(res,503,{error:'Το Fair Delivery βρίσκεται σε προγραμματισμένη συντήρηση. Οι νέες καταχωρίσεις είναι προσωρινά απενεργοποιημένες.'},{'Retry-After':'600'});
+  }
 
   if (method === 'GET' && pathname === '/api/health') {
-    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.3.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: fairAssistant.configured(), aiModel: fairAssistant.configured()?fairAssistant.MODEL:null, storage: postgresPool ? 'postgres' : 'temporary-file' });
+    return sendJson(res, 200, { ok: true, service: 'Fair Delivery', version: '1.3.0', mode: DEMO_MODE ? 'local-demo' : 'pilot', aiConfigured: fairAssistant.configured(), aiModel: fairAssistant.configured()?fairAssistant.MODEL:null, storage: postgresPool ? 'postgres' : 'temporary-file', maintenance });
   }
 
 
@@ -952,6 +960,27 @@ async function handleApi(req, res, url) {
     state.shopSettlements.push(entry);
     try{await persistState();}catch(error){state.shopSettlements=state.shopSettlements.filter(x=>x.id!==entry.id);throw error;}
     return sendJson(res,201,{settlement:entry,...settlementSummary(state.orders,state.shopSettlements,storeId)});
+  }
+
+  if(method==='GET'&&pathname==='/api/admin/storage/verify'){
+    const session=requireRole(req,res,['admin']);if(!session)return;
+    if(!rateLimit(requestWindows,'admin-storage:'+clientIp(req),12,60*1000))return sendJson(res,429,{error:'Πολλοί έλεγχοι σε μικρό χρονικό διάστημα.'});
+    try{
+      await writeQueue;
+      let snapshot,updatedAt=null;
+      if(postgresPool){
+        const record=await postgresPool.query('SELECT body, updated_at FROM fair_delivery_state WHERE id = 1');
+        if(record.rows.length!==1)return sendJson(res,503,{error:'Δεν βρέθηκε αποθηκευμένο μητρώο.'});
+        snapshot=record.rows[0].body;updatedAt=record.rows[0].updated_at;
+      }else{
+        snapshot=JSON.parse(await fs.promises.readFile(STATE_FILE,'utf8'));
+      }
+      const integrity=migrationTools.validateSnapshot(snapshot);
+      const expires=process.env.FD_STORAGE_EXPIRES_AT||null;
+      return sendJson(res,200,{storage:postgresPool?'postgres':'temporary-file',stored:true,integritySha256:integrity.digest,counts:integrity.counts,lastPersistedAt:updatedAt,expiresAt:expires});
+    }catch{
+      return sendJson(res,503,{error:'Αποτυχία επαλήθευσης μόνιμης αποθήκευσης.'});
+    }
   }
 
   if(method==='POST'&&pathname==='/api/admin/backup'){

@@ -132,6 +132,16 @@ document.querySelectorAll('[data-local-report]').forEach(button=>button.onclick=
 $('clearAiChat').onclick=()=>{$('chatLog').replaceChildren();appendBubble('assistant','Τι θέλεις να δούμε;');FD.notice('aiMsg','');};
 
 function appendBubble(role,text,formatted=false){const node=document.createElement('div');node.className='bubble'+(role==='me'?' me':'');if(formatted){node.classList.add('ai-formatted');renderAiText(node,text);}else node.textContent=text;$('chatLog').appendChild(node);$('chatLog').scrollTop=$('chatLog').scrollHeight;}
+$('storageVerify').onclick=async()=>{
+ const b=$('storageVerify');b.disabled=true;FD.notice('storageVerifyStatus','Γίνεται έλεγχος της αποθηκευμένης βάσης…');
+ try{
+ const r=await FD.api('/api/admin/storage/verify');
+ const rows=Object.entries(r.counts).map(([k,v])=>k+': '+v).join(' · ');
+ const expiry=r.expiresAt?new Date(r.expiresAt).toLocaleDateString('el-GR'):'δεν έχει οριστεί στο Render';
+ FD.notice('storageVerifyStatus','Αποθήκευση: '+r.storage+' · Εγγραφές: '+rows+' · SHA-256: '+r.integritySha256+' · Ημερομηνία λήξης: '+expiry);
+ }catch(e){FD.notice('storageVerifyStatus','Ο έλεγχος απέτυχε: '+e.message,true);}
+ finally{b.disabled=false;}
+};
 $('backupDownload').onclick=async()=>{
  const button=$('backupDownload'),passphrase=$('backupPhrase').value;
  if(passphrase.length<20||passphrase!==$('backupRepeat').value){FD.notice('backupNotice','Η φράση πρέπει να έχει τουλάχιστον 20 χαρακτήρες και να συμφωνεί με την επανάληψη.',true);return;}
