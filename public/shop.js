@@ -59,9 +59,41 @@ function drawShopMap(orders, drivers, storeLocation) {
     shopLayers.push(L.circleMarker([d.lat, d.lng], { radius: 8, color: '#17b890', fillOpacity: .9 }).addTo(shopMap).bindPopup(`Οδηγός: ${FD.esc(d.name)}`));
   }
 }
+let opsLoaded=false,opsBusy=false,opsPaused=false,opsDirty=false;
+const dayNames={mon:'Δευτέρα',tue:'Τρίτη',wed:'Τετάρτη',thu:'Πέμπτη',fri:'Παρασκευή',sat:'Σάββατο',sun:'Κυριακή'};
+function updateOpsStatus(ops,store){
+ opsPaused=ops.paused;
+ const messages={draft:'Σε προετοιμασία',suspended:'Αναστολή από διαχειριστή',paused:'Προσωρινή παύση',outside_hours:'Εκτός ωραρίου'};
+ $('opsStatus').textContent=store.acceptingOrders?'Δέχεται παραγγελίες · '+ops.etaMin+'–'+ops.etaMax+' λεπτά':messages[store.reason]||'Δεν δέχεται παραγγελίες';
+ $('opsPause').textContent=ops.paused?'Άρση προσωρινής παύσης':'Προσωρινή παύση';
+ $('opsPause').disabled=opsBusy;
+}
+function fillOperations(ops,store){
+ updateOpsStatus(ops,store);
+ if(opsDirty||opsBusy&&opsLoaded)return;
+ $('opsSchedule').checked=ops.scheduleEnabled;
+ $('opsRadius').value=ops.radiusKm??'';
+ $('opsMinimum').value=ops.minOrder;
+ $('opsEtaMin').value=ops.etaMin;$('opsEtaMax').value=ops.etaMax;
+ if(!opsLoaded){
+ $('opsHours').innerHTML=Object.entries(dayNames).map(([day,label])=>'<div class="field"><label class="check"><input type="checkbox" id="ops-'+day+'-enabled"> '+label+'</label><div class="grid"><label>Από<input type="time" id="ops-'+day+'-open"></label><label>Έως<input type="time" id="ops-'+day+'-close"></label></div></div>').join('');
+ for(const id of ['opsSchedule','opsRadius','opsMinimum','opsEtaMin','opsEtaMax',...Object.keys(dayNames).flatMap(d=>['ops-'+d+'-enabled','ops-'+d+'-open','ops-'+d+'-close'])])$(id).addEventListener('input',()=>{opsDirty=true;});
+ }
+ for(const [day,row] of Object.entries(ops.hours)){$('ops-'+day+'-enabled').checked=row.enabled;$('ops-'+day+'-open').value=row.open;$('ops-'+day+'-close').value=row.close;}
+ opsLoaded=true;$('opsSave').disabled=false;
+}
+async function saveOperations(body){
+ if(opsBusy)return;opsBusy=true;$('opsPause').disabled=true;$('opsSave').disabled=true;
+ try{const r=await FD.api('/api/shop/operations',{method:'PATCH',body:JSON.stringify(body)});if(Object.keys(body).length>1)opsDirty=false;updateOpsStatus(r.operations,r.store);FD.notice('opsNotice','Οι ρυθμίσεις αποθηκεύτηκαν.');FD.notice('notice','Η κατάσταση του καταστήματος ενημερώθηκε.');}
+ catch(e){FD.notice('opsNotice',e.message,true);FD.notice('notice',e.message,true);}
+ finally{opsBusy=false;$('opsPause').disabled=false;$('opsSave').disabled=!opsLoaded;}
+}
+$('opsPause').onclick=()=>saveOperations({paused:!opsPaused});
+$('opsSave').onclick=()=>saveOperations({paused:opsPaused,scheduleEnabled:$('opsSchedule').checked,radiusKm:$('opsRadius').value===''?null:Number($('opsRadius').value),minOrder:Number($('opsMinimum').value),etaMin:Number($('opsEtaMin').value),etaMax:Number($('opsEtaMax').value),hours:Object.fromEntries(Object.keys(dayNames).map(day=>[day,{enabled:$('ops-'+day+'-enabled').checked,open:$('ops-'+day+'-open').value,close:$('ops-'+day+'-close').value}]))});
 async function loadOrders() {
   const [r, driverResponse, config, billing] = await Promise.all([FD.api('/api/orders'), FD.api('/api/shop/riders'), FD.api('/api/config'), FD.api('/api/shop/billing')]);
   $('storeTitle').textContent=config.store?.name||'Κατάστημα';
+  if(config.settings.operations&&config.store&&!opsBusy)fillOperations(config.settings.operations,config.store);
   $('shopBillingOutstanding').textContent=FD.money(billing.outstandingCents/100);
   $('shopPayoutInfo').textContent=billing.payout?(billing.payout.beneficiary+' · '+(billing.payout.iban?'IBAN: '+billing.payout.iban:'')+(billing.payout.irisPhone?' · IRIS: '+billing.payout.irisPhone:'')):'Δεν έχουν οριστεί στοιχεία εξόφλησης.';
   FD.notice('shopHoldNotice',billing.hold.suspended?'Αναστολή νέων παραγγελιών: '+billing.hold.reason+' · Επικοινώνησε με τον διαχειριστή για διευκρινίσεις ή εξόφληση.':'',billing.hold.suspended);
