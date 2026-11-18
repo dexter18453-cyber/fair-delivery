@@ -2,6 +2,28 @@
 const $ = id => document.getElementById(id);
 let shopMap = null; let storeMarker = null; let shopLayers = []; let currentDrivers = [];
 const MAP_CENTER = [37.97, 23.67];
+let seenNewOrders=null,audioContext=null,soundEnabled=false,ordersLoading=false,shopTimer=null,connectionFailures=0;
+function beep(){
+ if(!soundEnabled||!audioContext||audioContext.state!=='running')return;
+ const now=audioContext.currentTime;
+ for(const [offset,hz] of [[0,660],[.18,880],[.36,1047]]){const tone=audioContext.createOscillator(),gain=audioContext.createGain();tone.frequency.value=hz;gain.gain.setValueAtTime(.10,now+offset);gain.gain.exponentialRampToValueAtTime(.001,now+offset+.16);tone.connect(gain);gain.connect(audioContext.destination);tone.start(now+offset);tone.stop(now+offset+.17);}
+}
+$('shopSound').onclick=async()=>{
+ try{
+  if(soundEnabled){soundEnabled=false;await audioContext?.suspend();}
+  else{const Audio=window.AudioContext||window.webkitAudioContext;if(!Audio)throw Error('Ο browser δεν υποστηρίζει ήχο.');audioContext=audioContext||new Audio();await audioContext.resume();if(audioContext.state!=='running')throw Error('Ο browser δεν επέτρεψε ήχο.');soundEnabled=true;beep();}
+ }catch(e){soundEnabled=false;FD.notice('notice',e.message,true);}
+ $('shopSound').textContent=soundEnabled?'Απενεργοποίηση ήχου':'Ενεργοποίηση ήχου';$('shopSound').setAttribute('aria-pressed',String(soundEnabled));
+};
+function notifyOrders(orders){
+ const fresh=orders.filter(o=>o.status==='new');const current=new Set(fresh.map(o=>o.id));
+ $('newOrderCount').textContent='Νέες παραγγελίες: '+fresh.length;
+ document.title=fresh.length?'('+fresh.length+') Fair Delivery — Κατάστημα':'Fair Delivery — Κατάστημα';
+ if(seenNewOrders&&fresh.some(o=>!seenNewOrders.has(o.id))){beep();FD.notice('notice','Έφτασε νέα παραγγελία. Έλεγξε τη λίστα.');}
+ seenNewOrders=current;
+}
+function startPolling(){if(!shopTimer)shopTimer=setInterval(()=>loadOrders().catch(()=>{}),5000);}
+
 function renderDrivers(drivers) {
   $('riders').innerHTML = drivers.length ? drivers.map(d => `<div class="driver-row"><div style="min-width:0"><b>${FD.esc(d.name)}</b><div class="hint">${d.online ? '● Διαθέσιμος' : '○ Εκτός σύνδεσης'} · ${d.active ? 'Ενεργός' : 'Ανενεργός'}</div><div class="small" style="overflow-wrap:anywhere">ID: ${FD.esc(d.id)}</div></div><button class="secondary" data-reset-rider="${FD.esc(d.id)}">Νέος κωδικός</button></div>`).join('') : '<p class="hint">Δεν έχει δημιουργηθεί ακόμη οδηγός. Μπορείς να κάνεις διανομή από το κατάστημα χωρίς εγγραφή οδηγού.</p>';
   document.querySelectorAll('[data-reset-rider]').forEach(button => button.onclick = async () => {
@@ -91,6 +113,8 @@ async function saveOperations(body){
 $('opsPause').onclick=()=>saveOperations({paused:!opsPaused});
 $('opsSave').onclick=()=>saveOperations({paused:opsPaused,scheduleEnabled:$('opsSchedule').checked,radiusKm:$('opsRadius').value===''?null:Number($('opsRadius').value),minOrder:Number($('opsMinimum').value),etaMin:Number($('opsEtaMin').value),etaMax:Number($('opsEtaMax').value),hours:Object.fromEntries(Object.keys(dayNames).map(day=>[day,{enabled:$('ops-'+day+'-enabled').checked,open:$('ops-'+day+'-open').value,close:$('ops-'+day+'-close').value}]))});
 async function loadOrders() {
+  if(ordersLoading)return;ordersLoading=true;
+  try{
   const [r, driverResponse, config, billing] = await Promise.all([FD.api('/api/orders'), FD.api('/api/shop/riders'), FD.api('/api/config'), FD.api('/api/shop/billing')]);
   $('storeTitle').textContent=config.store?.name||'Κατάστημα';
   if(config.settings.operations&&config.store&&!opsBusy)fillOperations(config.settings.operations,config.store);
@@ -101,7 +125,7 @@ async function loadOrders() {
   currentDrivers = driverResponse.riders;
   renderDrivers(currentDrivers);
   if (document.activeElement !== $('shopDeliveryFee')) $('shopDeliveryFee').value = config.settings.shopDeliveryFee || 0;
-  const orders = r.orders;
+  const orders = r.orders;notifyOrders(orders);connectionFailures=0;$('shopConnection').textContent='Συνδεδεμένο · ενημέρωση '+new Date().toLocaleTimeString('el-GR');
   if ($('shopActive')) $('shopActive').textContent=String(orders.filter(o=>!['delivered','cancelled'].includes(o.status)).length);
   if ($('shopToday')) $('shopToday').textContent=String(orders.filter(o=>o.createdAt.slice(0,10)===new Date().toISOString().slice(0,10)).length);
   if ($('shopOnline')) $('shopOnline').textContent=String(currentDrivers.filter(d=>d.online).length);
@@ -115,8 +139,9 @@ async function loadOrders() {
   document.querySelectorAll('[data-store-delivery]').forEach(b => b.onclick = async () => { try { await FD.api(`/api/orders/${b.dataset.storeDelivery}`, { method: 'PATCH', body: JSON.stringify({ status: 'assigned', storeDelivery: true }) }); FD.notice('notice', 'Η παραγγελία έφυγε για παράδοση με διανομέα του καταστήματος.'); await loadOrders(); } catch (e) { FD.notice('notice', e.message, true); } });
   if (!shopMap) initShopMap(config.storeLocation); drawShopMap(orders, currentDrivers, config.storeLocation);
   await loadShopProducts();
+  }catch(e){connectionFailures++;$('shopConnection').textContent='Η τελευταία ενημέρωση απέτυχε. Τα δεδομένα μπορεί να μην είναι επίκαιρα.';if(e.status===401){clearInterval(shopTimer);shopTimer=null;$('app').classList.add('hidden');$('login').classList.remove('hidden');FD.notice('loginMsg','Η σύνδεση έληξε. Συνδέσου ξανά.',true);}else if(connectionFailures>=2)FD.notice('notice','Δεν ανανεώνονται οι παραγγελίες. Έλεγξε τη σύνδεση.',true);throw e;}finally{ordersLoading=false;}
 }
-async function enter() { try { await FD.login('shop', $('code').value,{storeId:$('storeId').value.trim()||'default'}); $('login').classList.add('hidden'); $('app').classList.remove('hidden'); await loadOrders(); setInterval(() => loadOrders().catch(() => {}), 8000); } catch (e) { FD.notice('loginMsg', e.message, true); } }
+async function enter() { try { await FD.login('shop', $('code').value,{storeId:$('storeId').value.trim()||'default'}); $('login').classList.add('hidden'); $('app').classList.remove('hidden'); await loadOrders(); startPolling(); } catch (e) { FD.notice('loginMsg', e.message, true); } }
 $('loginBtn').onclick = enter;
 $('createRider').onclick = async () => { try { const name = $('riderName').value.trim(); const r = await FD.api('/api/shop/riders', { method: 'POST', body: JSON.stringify({ name }) }); $('riderName').value = ''; FD.notice('riderCodeNotice', `Οδηγός: ${r.rider.name} · ID: ${r.rider.id}
 Προσωπικός κωδικός (εμφανίζεται μόνο τώρα): ${r.accessCode}`); await loadOrders(); } catch (e) { FD.notice('riderCodeNotice', e.message, true); } };
@@ -130,4 +155,4 @@ $('addProduct').onclick = async () => { try {
 } catch (e) { FD.notice('productNotice', e.message, true); } };
 $('refresh').onclick = () => loadOrders().catch(e => FD.notice('notice', e.message, true));
 $('logout').onclick = async () => { await FD.logout('shop'); location.reload(); };
-(async () => { const m = await FD.me('shop'); if (m.authenticated && m.role === 'shop') { $('login').classList.add('hidden'); $('app').classList.remove('hidden'); await loadOrders(); setInterval(() => loadOrders().catch(() => {}), 8000); } })().catch(() => {});
+(async () => { const m = await FD.me('shop'); if (m.authenticated && m.role === 'shop') { $('login').classList.add('hidden'); $('app').classList.remove('hidden'); await loadOrders(); startPolling(); } })().catch(() => {});
