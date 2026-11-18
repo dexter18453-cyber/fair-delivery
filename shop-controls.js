@@ -32,4 +32,19 @@ function shopHold(body,previous,billing){
  if(previous?.suspended&&billing.outstandingCents&&(reason.length<10||reason.length>600))error('Απαιτείται αιτιολογία διόρθωσης.');
  return {suspended:false,reason:reason.slice(0,600),changedAt:new Date().toISOString()};
 }
-module.exports={normalizeIban,paymentDetails,shopHold};
+// Bootstrap from private runtime configuration only. Existing saved settings take precedence.
+function initialPayout(saved,env=process.env){
+ if(saved && typeof saved==='object')return saved;
+ if(!env.FD_PAYOUT_IBAN)return null;
+ const payout=paymentDetails({iban:env.FD_PAYOUT_IBAN,beneficiary:env.FD_PAYOUT_BENEFICIARY});
+ const pending=String(env.FD_PAYOUT_PENDING_IRIS||'').replace(/[\s()-]/g,'');
+ if(pending && !/^(?:\+30)?69\d{8}$/.test(pending))error('Μη έγκυρη μορφή εκκρεμούς IRIS.');
+ return {...payout,pendingIrisPhone:pending};
+}
+// Never expose unverified IRIS even to authenticated shops.
+function visiblePayout(payout,role){
+ if(!payout)return null;
+ const {iban='',beneficiary='',irisPhone='',updatedAt=null,pendingIrisPhone=''}=payout;
+ return {iban,beneficiary,irisPhone,updatedAt,...(role==='admin'?{pendingIrisPhone}:{})};
+}
+module.exports={normalizeIban,paymentDetails,shopHold,initialPayout,visiblePayout};
