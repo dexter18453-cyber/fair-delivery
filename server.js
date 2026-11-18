@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
-const {paymentDetails,shopHold}=require('./shop-controls');
+const {paymentDetails,shopHold,initialPayout,visiblePayout}=require('./shop-controls');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
 const { validateApplication, evaluateApplication, pruneApplications } = require('./courier-onboarding');
 
@@ -72,7 +72,7 @@ function normalizeState(parsed = {}) {
     courierApplications: pruneApplications(parsed.courierApplications),
     customers: parsed.customers && typeof parsed.customers === 'object' && !Array.isArray(parsed.customers) ? parsed.customers : {},
     shopSettlements: Array.isArray(parsed.shopSettlements) ? parsed.shopSettlements : [],
-    shopPayout: parsed.shopPayout || null,
+    shopPayout: initialPayout(parsed.shopPayout),
     shopHolds: parsed.shopHolds || {},
     shopHoldHistory: Array.isArray(parsed.shopHoldHistory)?parsed.shopHoldHistory:[]
   };
@@ -714,7 +714,7 @@ async function handleApi(req, res, url) {
   if(method==='GET' && pathname==='/api/shop/billing'){
     const session=requireRole(req,res,['shop','admin']);if(!session)return;
     const storeId=session.storeId||'default';
-    return sendJson(res,200,{...settlementSummary(state.orders,state.shopSettlements,storeId),payout:state.shopPayout,hold:state.shopHolds[storeId]||{suspended:false},holdHistory:state.shopHoldHistory.filter(x=>x.storeId===storeId).slice(-30)});
+    return sendJson(res,200,{...settlementSummary(state.orders,state.shopSettlements,storeId),payout:visiblePayout(state.shopPayout,session.role),hold:state.shopHolds[storeId]||{suspended:false},holdHistory:state.shopHoldHistory.filter(x=>x.storeId===storeId).slice(-30)});
   }
   if(method==='PATCH' && ['/api/admin/shop-payout','/api/admin/shop-hold'].includes(pathname)){
     const session=requireRole(req,res,['admin']);if(!session)return;
