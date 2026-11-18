@@ -155,15 +155,19 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
   assert.ok(registered.account.alias); assert.equal(registered.account.passwordHash,undefined);
   rememberCookie(register,'customer');
   const contact={items:[{productId:menu.products[0].id,qty:1}],customerName:'Pilot Test',customerPhone:'6900000088',deliveryAddress:'Test Street 1, Athens',deliveryLocation:{lat:37.98,lng:23.72},privacyConsent:true};
-  for(const paymentMethod of ['cash','card','iris']){
+  for(const paymentMethod of ['cash']){
     const response=await api('/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...contact,paymentMethod,confirmPaymentSimulation:true,paymentCollected:true,paymentStatus:'paid'})});
     assert.equal(response.order.paymentMethod,paymentMethod);
     assert.equal(response.order.paymentCollected,false);
     assert.equal(response.order.paymentStatus,'pilot_not_charged');
     assert.equal((await fetch(base+'/api/orders/'+response.order.id)).status,404);
   }
+  for(const paymentMethod of ['card','iris']) {
+    const disabled=await fetch(base+'/api/orders',{method:'POST',headers:{'Content-Type':'application/json','X-FD-Role':'customer',Cookie:Object.values(cookies).join('; ')},body:JSON.stringify({...contact,paymentMethod,confirmPaymentSimulation:true})});
+    assert.equal(disabled.status,409,'Disabled electronic methods must not create orders');
+  }
   const ownOrders=await api('/api/customer/orders');
-  assert.equal(ownOrders.orders.length,3);
+  assert.equal(ownOrders.orders.length,1);
   assert.equal((await fetch(base+'/api/customer/orders')).status,401);
   const blocked=await fetch(base+'/api/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...contact,paymentMethod:'card',confirmPaymentSimulation:true})});
   assert.equal(blocked.status,401);
@@ -176,7 +180,7 @@ async function login(role, extra = {}) { const r = await fetch(base + '/api/auth
 
   assert.equal(stats.platformFeeToday, 3.58);
   const shopCode = await api('/api/admin/shop-code', { method: 'POST' }); assert.ok(shopCode.accessCode);
-  const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8')); assert.equal(saved.orders.length, 5); assert.equal(Object.keys(saved.customers).length,0); assert.ok(saved.riders[created.rider.id].codeHash); assert.ok(saved.shopCredential.codeHash);
+  const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8')); assert.equal(saved.orders.length, 3); assert.equal(Object.keys(saved.customers).length,0); assert.ok(saved.riders[created.rider.id].codeHash); assert.ok(saved.shopCredential.codeHash);
   console.log('PASS: health, static assets, shop login, stable rider account, individual rider credentials, checkout contact/address/map pin, shop assignment, rider-only assigned orders, GPS update, privacy-safe tracking, delivery workflow, payout estimate, admin stats and persistence.');
  } catch (e) { console.error('FAIL:', e); process.exitCode = 1; }
  finally { child.kill('SIGTERM'); setTimeout(() => { try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch {} }, 1000); }

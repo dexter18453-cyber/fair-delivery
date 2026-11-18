@@ -20,7 +20,7 @@ function checkoutPayment(body, account) {
   if (explicit && !account) fail('Συνδέσου σε δοκιμαστικό λογαριασμό πελάτη πρώτα.', 401);
   // No payment processor credentials, checkout initiation or webhook verification yet.
   // All methods are simulations. Never accept payment state from the browser.
-  if (method !== 'cash' && body.confirmPaymentSimulation !== true) fail('Κάρτα και IRIS είναι διαθέσιμα μόνο ως δοκιμή χωρίς χρέωση.', 409);
+  if (method !== 'cash') fail('Οι πληρωμές με κάρτα και IRIS δεν είναι ενεργές. Επίλεξε μετρητά.', 409);
   return { paymentMethod: method, paymentStatus: 'pilot_not_charged', paymentMode: 'simulation', paymentCollected: false };
 }
 module.exports = { METHODS, credentials, publicAccount, newAccount, checkoutPayment };
