@@ -1,6 +1,8 @@
 'use strict';
 const crypto=require('node:crypto');
 const MAX_BYTES=32*1024*1024;
+function canonical(value){if(Array.isArray(value))return '['+value.map(x=>canonical(x===undefined?null:x)).join(',')+']';if(value&&typeof value==='object')return '{'+Object.keys(value).filter(k=>value[k]!==undefined).sort().map(k=>JSON.stringify(k)+':'+canonical(value[k])).join(',')+'}';return JSON.stringify(value);}
+
 function validateSnapshot(snapshot){
  if(!snapshot||typeof snapshot!=='object'||Array.isArray(snapshot))throw Error('Το αντίγραφο δεν περιέχει έγκυρο αντικείμενο.');
  if(!snapshot.settings||typeof snapshot.settings!=='object'||Array.isArray(snapshot.settings)||!Array.isArray(snapshot.products)||!Array.isArray(snapshot.orders)||!snapshot.customers||typeof snapshot.customers!=='object'||Array.isArray(snapshot.customers))throw Error('Το αντίγραφο δεν περιέχει τις απαιτούμενες δομές του Fair Delivery.');
@@ -10,7 +12,7 @@ function validateSnapshot(snapshot){
  const orders=new Set();for(const order of snapshot.orders){if(!order||typeof order.id!=='string'||orders.has(order.id))throw Error('Διπλά ή μη έγκυρα αναγνωριστικά παραγγελιών.');orders.add(order.id);}
  const products=new Set();for(const p of snapshot.products){if(!p||typeof p.id!=='string'||products.has(p.id))throw Error('Διπλά ή μη έγκυρα αναγνωριστικά προϊόντων.');products.add(p.id);}
  const shape={stores:Object.keys(snapshot.stores).length,customers:Object.keys(snapshot.customers).length,orders:snapshot.orders.length,products:snapshot.products.length,riders:Object.keys(snapshot.riders).length,applications:Array.isArray(snapshot.courierApplications)?snapshot.courierApplications.length:0,settlements:Array.isArray(snapshot.shopSettlements)?snapshot.shopSettlements.length:0};
- const digest=crypto.createHash('sha256').update(text).digest('hex');
+ const digest=crypto.createHash('sha256').update(canonical(snapshot)).digest('hex');
  return {digest,counts:shape,serialized:text};
 }
 async function installSnapshot(db,snapshot){
