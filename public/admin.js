@@ -55,8 +55,8 @@ async function loadBilling(){
   $('billingOutstanding').textContent=FD.money(data.outstandingCents/100);
   $('payoutBeneficiary').value=data.payout?.beneficiary||'';
   $('payoutIban').value=data.payout?.iban||'';
-  $('payoutPhone').value=data.payout?.irisPhone||'';
-  $('payoutIrisConfirmed').checked=false;
+  $('payoutPhone').value=data.payout?.irisPhone||data.payout?.pendingIrisPhone||'';
+  $('payoutIrisConfirmed').checked=Boolean(data.payout?.irisPhone);
   $('holdStatus').textContent=data.hold.suspended?'Σε αναμονή: '+data.hold.reason:'Ενεργό — δέχεται παραγγελίες';
   $('holdSuspend').disabled=data.hold.suspended||!data.outstandingCents;
   $('holdResume').disabled=!data.hold.suspended;
