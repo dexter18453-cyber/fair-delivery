@@ -595,7 +595,10 @@ async function handleApi(req, res, url) {
       const name=body.name.trim();if(name.length<2||name.length>100)return sendJson(res,400,{error:'Μη έγκυρο όνομα.'});
       if(id==='default')state.defaultStoreName=name;else store.name=name;
     }
-    if(typeof body.active==='boolean'&&id!=='default')store.active=body.active;
+    if(typeof body.active==='boolean'&&id!=='default'){
+      if(body.active&&(!store.products.some(p=>p.active)||!store.settings.storeLocation))return sendJson(res,409,{error:'Πρόσθεσε ενεργό προϊόν και σημείο καταστήματος πριν την εμφάνιση στο πιλοτικό μενού.'});
+      store.active=body.active;
+    }
     await persistState();return sendJson(res,200,{store:publicStore(state,getStore(state,id))});
   }
 
@@ -666,6 +669,7 @@ async function handleApi(req, res, url) {
     if(!store||!store.active)return sendJson(res,404,{error:'Το κατάστημα δεν είναι διαθέσιμο.'});
     const customerSession = getSession(req, 'customer');
     const customerAccount = customerSession ? state.customers[customerSession.userId] : null;
+    if(store.id!=='default'&&!customerAccount)return sendJson(res,401,{error:'Συνδέσου στον δοκιμαστικό λογαριασμό σου.'});
     let payment;
     try { payment = checkoutPayment(body, customerAccount); } catch (error) { return sendJson(res, error.statusCode || 400, {error:error.message}); }
     if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 30) return sendJson(res, 400, { error: 'Το καλάθι δεν είναι έγκυρο.' });
@@ -857,9 +861,14 @@ async function handleApi(req, res, url) {
 
   if (method === 'POST' && pathname === '/api/admin/shop-code') {
     const session = requireRole(req, res, ['admin']); if (!session) return;
+    const body=await readJson(req,1024);
+    const storeId=validStoreId(body.storeId||'default'),store=storeId&&getStore(state,storeId);
+    if(!store)return sendJson(res,404,{error:'Το κατάστημα δεν βρέθηκε.'});
     const accessCode = crypto.randomBytes(18).toString('base64url');
     const codeSalt = crypto.randomBytes(16).toString('hex');
-    state.shopCredential = { codeSalt, codeHash: await riderCodeHash(accessCode, codeSalt), updatedAt: nowIso() };
+    const credential={codeSalt,codeHash:await riderCodeHash(accessCode,codeSalt),updatedAt:nowIso()};
+    if(storeId==='default')state.shopCredential=credential;else Object.assign(store,credential);
+    for(const [token,old] of sessions)if(old.role==='shop'&&old.storeId===storeId)sessions.delete(token);
     await persistState();
     return sendJson(res, 200, { accessCode, warning: postgresPool ? null : 'Προσοχή: χωρίς μόνιμη βάση ο κωδικός χάνεται σε νέο deployment.' });
   }
