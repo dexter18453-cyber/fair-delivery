@@ -1486,16 +1486,23 @@ async function serveRoleApp(req, res, url) {
   return true;
 }
 
-const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.webp': 'image/webp' };
-const PUBLIC_FILES = new Set(['index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/pita.webp', 'assets/neighborhood.webp', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js', 'courier-interest.js', 'courier-qualification.html', 'customer-account.js']);
+const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.xml': 'application/xml; charset=utf-8', '.txt': 'text/plain; charset=utf-8' };
+const PUBLIC_FILES = new Set(['discover.html', 'robots.txt', 'sitemap.xml', 'index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/pita.webp', 'assets/neighborhood.webp', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js', 'courier-interest.js', 'courier-qualification.html', 'customer-account.js']);
 async function serveStatic(req, res, url) {
-  let requested = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname).replace(/^\/+/, '');
+  let requested = decodeURIComponent(url.pathname === '/' ? '/discover.html' : url.pathname).replace(/^\/+/, '');
   if (!PUBLIC_FILES.has(requested)) return sendJson(res, 404, { error: 'Η σελίδα δεν βρέθηκε.' });
   const file = path.join(__dirname, 'public', requested);
   try {
     const content = await fs.promises.readFile(file);
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'Cache-Control': requested.endsWith('.html') ? 'no-cache' : 'public, max-age=3600' });
-    res.end(content);
+    const privatePage = new Set(['index.html', 'shop-app.html', 'Rider-App.html']).has(requested);
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'strict-origin-when-cross-origin',
+      'Cache-Control': requested.endsWith('.html') || requested === 'robots.txt' || requested === 'sitemap.xml' ? 'no-cache' : 'public, max-age=3600',
+      ...(privatePage ? { 'X-Robots-Tag': 'noindex, nofollow' } : {})
+    });
+    res.end(req.method === 'HEAD' ? undefined : content);
   } catch { sendJson(res, 404, { error: 'Το αρχείο δεν βρέθηκε.' }); }
 }
 
