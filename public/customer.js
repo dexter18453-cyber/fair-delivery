@@ -7,8 +7,8 @@ let pendingCheckout=null;
 let deliveryMap = null; let deliveryMarker = null; let trackingMap = null; let trackingLayers = [];
 const DEFAULT_CENTER = [37.97, 23.67];
 function renderCart() {
-  let subtotal = 0; const rows = [];
-  for (const [id, qty] of cart) { const p = products.find(x => x.id === id); if (!p) continue; subtotal += p.price * qty;
+  let subtotal = 0, count = 0; const rows = [];
+  for (const [id, qty] of cart) { const p = products.find(x => x.id === id); if (!p) continue; subtotal += p.price * qty; count += qty;
     rows.push(`<div class="product"><div><b>${FD.esc(p.name)}</b><div class="hint">${FD.money(p.price)} × ${qty}</div></div><div class="qty"><button class="secondary" data-minus="${FD.esc(id)}">−</button><b>${qty}</b><button data-plus="${FD.esc(id)}">+</button></div></div>`);
   }
   $('cart').innerHTML = rows.join('') || '<p class="hint">Το καλάθι είναι άδειο.</p>';
@@ -16,6 +16,9 @@ function renderCart() {
   $('serviceFee').textContent = FD.money(rows.length ? serviceFee : 0);
   $('deliveryFee').textContent = FD.money(rows.length ? deliveryFee : 0);
   $('total').textContent = FD.money(rows.length ? subtotal + serviceFee + deliveryFee : 0);
+  $('menuCart').hidden = count === 0;
+  $('menuCart').textContent = 'Προβολή καλαθιού (' + count + ') · ' + $('total').textContent;
+  $('cartTabLabel').textContent = count ? 'Καλάθι (' + count + ')' : 'Καλάθι';
   $('minimumNotice').textContent=rows.length&&Math.round(subtotal*100)<Math.round(minOrder*100)?'Ελάχιστη αξία προϊόντων: '+FD.money(minOrder):'';
   const covered=checkCoverage();
   $('placeOrder').disabled = submitting || storeLoading || !rows.length || !acceptingOrders || Math.round(subtotal*100)<Math.round(minOrder*100) || !covered;
@@ -59,7 +62,7 @@ function productEmoji(p) {
 function renderFilteredProducts() {
   const q=($('productSearch')?.value||'').trim().toLocaleLowerCase('el-GR');
   const visible=products.filter(p=>(selectedCategory==='Όλα'||(p.category||'Μενού')===selectedCategory)&&(!q||[p.name,p.category,p.description].join(' ').toLocaleLowerCase('el-GR').includes(q)));
-  $('products').innerHTML=visible.map(p=>`<article class="product product-card"><span class="product-emoji" aria-hidden="true">${productEmoji(p)}</span><div class="product-content"><span class="eyebrow">${FD.esc(p.category||'Μενού')}</span><h3>${FD.esc(p.name)}</h3><p class="hint">${FD.esc(p.description||'Επιλογή από το μενού')}</p><div class="product-bottom"><strong class="price">${FD.money(p.price)}</strong><button data-add="${FD.esc(p.id)}">＋ Προσθήκη</button></div></div></article>`).join('')||'<div class="empty-state">Δεν βρέθηκαν προϊόντα. Δοκίμασε άλλη αναζήτηση.</div>';
+  $('products').innerHTML=visible.map(p=>`<article class="product product-card"><span class="product-emoji" aria-hidden="true">${productEmoji(p)}</span><div class="product-content"><span class="eyebrow">${FD.esc(p.category||'Μενού')}</span><h3>${FD.esc(p.name)}</h3><p class="hint">${FD.esc(p.description||'Επιλογή από το μενού')}</p><div class="product-bottom"><strong class="price">${FD.money(p.price)}</strong><button data-add="${FD.esc(p.id)}">＋ Προσθήκη</button></div></div></article>`).join('')||(products.length ? '<div class="empty-state">Δεν βρέθηκαν προϊόντα. Δοκίμασε άλλη αναζήτηση.</div>' : '<div class="empty-state">Το κατάστημα δεν έχει διαθέσιμα προϊόντα αυτή τη στιγμή.</div>');
   document.querySelectorAll('[data-add]').forEach(b=>b.onclick=()=>changeQty(b.dataset.add,1));
 }
 async function loadProducts() {
