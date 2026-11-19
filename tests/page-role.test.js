@@ -7,7 +7,7 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../public/assets/common.js'), 'utf8');
 
 test('each page sends its own role when several account cookies share a browser', async () => {
-  for (const [pathname, expected] of [['/', 'admin'], ['/index.html', 'admin'], ['/shop-app.html', 'shop'], ['/Rider-App.html', 'rider'], ['/customer-app.html', '']]) {
+  for (const [pathname, expected] of [['/', 'admin'], ['/index.html', 'admin'], ['/shop-app.html', 'shop'], ['/Rider-App.html', 'rider'], ['/customer-app.html', 'customer'], ['/app/admin/', 'admin'], ['/app/shop/', 'shop'], ['/app/rider/', 'rider'], ['/app/customer/', 'customer']]) {
     const requests = [];
     const context = vm.createContext({
       location: { pathname },

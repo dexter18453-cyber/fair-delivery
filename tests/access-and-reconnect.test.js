@@ -20,7 +20,7 @@ test('assigned deliveries survive login and restart, with separate roles and pri
   async function start() {
     child = spawn(process.execPath, ['server.js'], {
       cwd: path.join(__dirname, '..'),
-      env: { ...process.env, NODE_ENV: 'test', DEMO_MODE: 'true', DATA_DIR: dataDir, HOST: '127.0.0.1', PORT: String(port) },
+      env: { ...process.env, RENDER: '', DATABASE_URL: '', NODE_ENV: 'test', DEMO_MODE: 'true', DATA_DIR: dataDir, HOST: '127.0.0.1', PORT: String(port) },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     child.stdout.on('data', chunk => { logs = (logs + chunk).slice(-3000); });
@@ -59,12 +59,17 @@ test('assigned deliveries survive login and restart, with separate roles and pri
     assert.equal(listed.riders.length, 2);
     assert.equal(JSON.stringify(listed).includes('codeHash'), false);
     const menu = (await request('/api/products')).data;
+    const newProduct = (await request('/api/shop/products', { role: 'shop', method: 'POST', status: 201, body: { name: 'Νέο προϊόν', category: 'Φαγητό', price: 7.5, active: true } })).data.product;
+    assert.ok((await request('/api/products')).data.products.some(p => p.id === newProduct.id));
+    await request(`/api/shop/products/${newProduct.id}`, { role: 'shop', method: 'PATCH', body: { active: false, price: 8 } });
+    assert.equal((await request('/api/products')).data.products.some(p => p.id === newProduct.id), false);
+    await request('/api/shop/products', { role: 'rider', status: 401 });
     const checkout = { items: [{ productId: menu.products[0].id, qty: 2, price: 0.01 }], customerName: 'Test Customer', customerPhone: '6900000000', deliveryAddress: 'Test Street 10, Athens', deliveryLocation: { lat: 37.98, lng: 23.72 }, privacyConsent: true };
     await request('/api/orders', { method: 'POST', body: null, status: 400 });
     await request('/api/orders', { method: 'POST', body: { ...checkout, deliveryLocation: { lat: null, lng: null } }, status: 400 });
     await request('/api/orders', { method: 'POST', body: { ...checkout, items: [null] }, status: 400 });
     const order = (await request('/api/orders', { method: 'POST', body: checkout, status: 201 })).data.order;
-    assert.equal(order.subtotal, 9.8); assert.equal(order.total, 10);
+    assert.equal(order.subtotal, 9.8); assert.equal(order.total, 9.8);
     const endpoint = `/api/orders/${order.id}`;
     await request(endpoint, { role: 'shop', method: 'PATCH', body: { status: 'delivered' }, status: 409 });
     await request(endpoint, { role: 'shop', method: 'PATCH', body: { status: 'accepted' } });
@@ -102,16 +107,32 @@ test('assigned deliveries survive login and restart, with separate roles and pri
     await request(endpoint, { role: 'rider', method: 'PATCH', body: { status: 'delivered', estimatedKm: 2.8, badWeather: true } });
     assert.equal((await request(endpoint)).data.order.riderLocation, null);
     await request('/api/settings', { role: 'admin', method: 'PATCH', body: { customerServiceFee: 1.25, badWeatherBonus: -1 }, status: 400 });
-    assert.equal((await request('/api/config')).data.settings.customerServiceFee, 0.2);
+    assert.equal((await request('/api/config')).data.settings.customerServiceFee, 0);
+    await request('/api/shop/delivery-fee', { role: 'shop', method: 'POST', body: { deliveryFee: 2 } });
+    const deliveryOrder = (await request('/api/orders', { method: 'POST', status: 201, body: checkout })).data.order;
+    assert.equal(deliveryOrder.total, 11.8);
+    const deliveryEndpoint = `/api/orders/${deliveryOrder.id}`;
+    await request(deliveryEndpoint, { role: 'shop', method: 'PATCH', body: { status: 'accepted' } });
+    await request(deliveryEndpoint, { role: 'shop', method: 'PATCH', body: { status: 'ready' } });
+    await request(deliveryEndpoint, { role: 'shop', method: 'PATCH', body: { status: 'assigned', storeDelivery: true } });
+    const shopDelivery = (await request(deliveryEndpoint, { role: 'shop', method: 'PATCH', body: { status: 'delivered' } })).data.order;
+    assert.equal(shopDelivery.deliveryManagedByShop, true);
+    assert.equal(shopDelivery.riderPayEstimate, null);
+    const reset = (await request(`/api/shop/riders/${a.rider.id}/reset-code`, { role: 'shop', method: 'POST', body: {}, status: 200 })).data;
+    await request('/api/auth/login', { method: 'POST', status: 401, body: { role: 'rider', riderId: a.rider.id, code: a.accessCode } });
+    await login('rider', { riderId: a.rider.id, code: reset.accessCode });
+    const newShopCode = (await request('/api/admin/shop-code', { role: 'admin', method: 'POST', body: {} })).data.accessCode;
+    await request('/api/auth/login', { method: 'POST', body: { role: 'shop', code: newShopCode } });
     const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'state.json'), 'utf8'));
     assert.equal(saved.orders[0].assignedRider, a.rider.id); assert.equal(saved.orders[0].status, 'delivered');
     assert.equal(JSON.stringify(saved).includes(a.accessCode), false);
     await stop(); await start();
     await request('/api/orders', { role: 'rider', status: 401 });
-    const restored = await login('rider', { riderId: a.rider.id, code: a.accessCode });
+    const restored = await login('rider', { riderId: a.rider.id, code: reset.accessCode });
     assert.equal(restored.userId, a.rider.id);
     assert.equal((await request(endpoint)).data.order.status, 'delivered');
-    assert.equal((await request('/api/config')).data.settings.customerServiceFee, 0.2);
+    assert.equal((await request('/api/config')).data.settings.customerServiceFee, 0);
+    assert.equal((await request('/api/config')).data.settings.shopDeliveryFee, 2);
     for (let i = 0; i < 19; i++) await request('/api/auth/login', { method: 'POST', body: { role: 'rider', riderId: 'missing', code: 'bad' }, status: 401 });
     await request('/api/auth/login', { method: 'POST', body: { role: 'rider', riderId: 'missing', code: 'bad' }, status: 429 });
   } finally { await stop(); fs.rmSync(dataDir, { recursive: true, force: true }); }
