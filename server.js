@@ -146,6 +146,20 @@ function riderProfile(rider) {
   return { id: rider.id, name: rider.name, online: Boolean(rider.online), storeId: rider.storeId || 'default' };
 }
 
+async function storeRouteKm(origin, destination) {
+  const endpoint = process.env.ROUTING_BASE_URL;
+  if (!endpoint || !validPoint(origin) || !validPoint(destination)) return null;
+  const coordinates = [origin, destination].map(p => [p.lng, p.lat].join(',')).join(';');
+  try {
+    const url = endpoint.replace(/\/$/, '') + '/route/v1/driving/' + coordinates + '?overview=false';
+    const response = await fetch(url, { signal: AbortSignal.timeout(3000), redirect: 'error' });
+    if (!response.ok) return null;
+    const result = await response.json();
+    const metres = result.routes?.[0]?.distance;
+    return result.code === 'Ok' && Number.isFinite(metres) && metres >= 0 ? round2(metres / 1000) : null;
+  } catch { return null; }
+}
+
 function validPoint(point) {
   return point && typeof point.lat === 'number' && typeof point.lng === 'number' &&
     Number.isFinite(point.lat) && Number.isFinite(point.lng) && Math.abs(point.lat) <= 90 && Math.abs(point.lng) <= 180;
@@ -936,6 +950,9 @@ async function handleApi(req, res, url) {
     if(customerAccount?.credentialKind==='email')return sendJson(res,409,{error:'Οι πραγματικές παραγγελίες δεν έχουν ενεργοποιηθεί ακόμη.'});
     let requestId,requestDigest;
     try{requestId=checkoutReliability.requestKey(body,customerAccount);if(requestId)requestDigest=checkoutReliability.digest(body,id);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
+    const routeKm = body.privacyConsent === true
+      ? await storeRouteKm(store?.settings?.storeLocation, body.deliveryLocation)
+      : null;
     const pendingKey=requestId?customerAccount.id+':'+requestId:null;
     if(pendingKey){
       const pending=checkoutPending.get(pendingKey);
@@ -984,7 +1001,9 @@ async function handleApi(req, res, url) {
       total: round2(subtotal + (store.settings.shopDeliveryFee||0)),
       billingModel: 'shop-fixed-v1', shopFeeCents: FEE_CENTS, completedAt: null,
       status: 'new', createdAt: nowIso(), updatedAt: nowIso(),
-      estimatedKm: null, badWeather: false, riderPayEstimate: null,
+      estimatedKm: routeKm, badWeather: false,
+      routePayEstimate: routeKm === null ? null : round2(state.settings.riderBaseAmount + routeKm * state.settings.riderPerKm),
+      riderPayEstimate: routeKm === null ? null : round2(state.settings.riderBaseAmount + routeKm * state.settings.riderPerKm),
       assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
     };
     state.orders.push(order);
@@ -1042,7 +1061,7 @@ async function handleApi(req, res, url) {
       }
     }
     let estimatedKm = order.estimatedKm;
-    if (body.estimatedKm !== undefined) {
+    if (order.routePayEstimate == null && body.estimatedKm !== undefined) {
       const km = Number(body.estimatedKm);
       if (typeof body.estimatedKm !== 'number' || !Number.isFinite(km) || km < 0 || km > 100) return sendJson(res, 400, { error: 'Τα χιλιόμετρα πρέπει να είναι από 0 έως 100.' });
       estimatedKm = round2(km);
@@ -1052,8 +1071,8 @@ async function handleApi(req, res, url) {
     if (assignedRider) { order.assignedRider = assignedRider.id; order.assignedRiderName = assignedRider.name; }
     if (status === 'assigned') order.deliveryManagedByShop = shopManagedDelivery;
     if (body.badWeather !== undefined) order.badWeather = body.badWeather;
-    if (status === 'delivered' && !order.deliveryManagedByShop && Number.isFinite(order.estimatedKm)) {
-      order.riderPayEstimate = round2(state.settings.riderBaseAmount + order.estimatedKm * state.settings.riderPerKm + (order.badWeather ? state.settings.badWeatherBonus : 0));
+    if (status === 'delivered' && Number.isFinite(order.estimatedKm)) {
+      order.riderPayEstimate = round2((order.routePayEstimate ?? (state.settings.riderBaseAmount + order.estimatedKm * state.settings.riderPerKm)) + (order.badWeather ? state.settings.badWeatherBonus : 0));
     }
     order.status = status; order.updatedAt = nowIso();
     if (session.role === 'shop' && status === 'ready' && body.autoAssign === true) {
