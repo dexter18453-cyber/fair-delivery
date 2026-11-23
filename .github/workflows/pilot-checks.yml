@@ -1,0 +1,23 @@
+name: Pilot checks
+on:
+  push:
+    branches: [feature/pricing-foundation-20261123]
+  pull_request:
+    paths:
+      - 'server.js'
+      - 'app.js'
+      - 'lib/**'
+      - 'tests/**'
+      - 'package.json'
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm run check
+      - run: npm test
