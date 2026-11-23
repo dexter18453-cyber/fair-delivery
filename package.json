@@ -1,0 +1,15 @@
+{
+  "name": "fair-delivery-pilot",
+  "version": "2.0.0-beta.1",
+  "private": true,
+  "description": "Fair Delivery Greek pilot — 2.30 EUR fee and 8% merchant commission",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check server.js && node --check app.js && node --check lib/pricing.js && node --check lib/store.js"
+  },
+  "dependencies": {
+    "pg": "^8.16.0"
+  }
+}
