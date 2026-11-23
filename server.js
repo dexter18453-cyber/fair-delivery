@@ -24,6 +24,8 @@ let migrationCopyBusy=false;
 const credentialChanges=new Set();
 let backupBusy=false;
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
+const { SERVICE_FEE_CENTS, COMMISSION_BPS, priceOrder } = require('./billing-pricing');
+const { feeReport } = require('./financial-report');
 const {paymentDetails,shopHold,initialPayout,visiblePayout}=require('./shop-controls');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
 const { validateApplication, evaluateApplication, pruneApplications } = require('./courier-onboarding');
@@ -55,10 +57,10 @@ const authWindows = new Map();
 
 const DEFAULT_SETTINGS = {
   currency: 'EUR',
-  customerServiceFee: 0,
-  shopOrderFee: 1,
+  customerServiceFee: SERVICE_FEE_CENTS / 100,
+  shopOrderFee: 0,
   shopDeliveryFee: 0,
-  shopCommissionPercent: 0,
+  shopCommissionPercent: COMMISSION_BPS / 100,
   riderBaseAmount: 2.50,
   riderPerKm: 0.80,
   badWeatherBonus: 1.50,
@@ -77,11 +79,11 @@ let postgresPool = null;
 
 function normalizeState(parsed = {}) {
   const settings = { ...DEFAULT_SETTINGS, ...(parsed.settings || {}) };
-  // Fixed shop-funded pricing. Never reprice historical orders.
-  settings.customerServiceFee = 0;
-  settings.shopCommissionPercent = 0;
-  settings.shopOrderFee = FEE_CENTS / 100;
-  settings.pricingVersion = 3;
+  // Version 4 pricing only affects NEW orders; prior order snapshots remain unchanged.
+  settings.customerServiceFee = SERVICE_FEE_CENTS / 100;
+  settings.shopCommissionPercent = COMMISSION_BPS / 100;
+  settings.shopOrderFee = 0;
+  settings.pricingVersion = 4;
   return {
     settings,
     products: Array.isArray(parsed.products) ? parsed.products : DEFAULT_PRODUCTS,
@@ -126,7 +128,8 @@ function privateOrder(order) {
   const rider = order.assignedRider ? state.riders[order.assignedRider] : null;
   return {
     ...publicOrder(order),
-    shopFeeCents: order.billingModel==='shop-fixed-v1' ? order.shopFeeCents : 0,
+    shopFeeCents: ['shop-fixed-v1','shop-percent-v2'].includes(order.billingModel) ? order.shopFeeCents : 0,
+    pricingSnapshot: order.pricingSnapshot || null,
     completedAt: order.completedAt || null,
     customerName: order.customerName || '',
     customerPhone: order.customerPhone || '',
@@ -363,12 +366,12 @@ function validateMoney(value, name, max = 5000) {
 
 function offlineHelp(question) {
   const q = question.toLocaleLowerCase('el-GR');
-  const fee = '1 ευρώ ανά ολοκληρωμένη παραγγελία από το κατάστημα';
+  const fee = '2,30 € στον πελάτη (με ΦΠΑ υπηρεσίας 24%) και 8% προμήθεια στο κατάστημα (πλέον ΦΠΑ υπηρεσίας)';
   if (/κωδικ|συνδε|λογαριασ|διανομ|rider/.test(q)) {
     return `Σύνδεση: ο διαχειριστής μπαίνει στο Control Center. Από εκεί εκδίδει νέο κωδικό καταστήματος. Το κατάστημα δημιουργεί κάθε διανομέα και του δίνει προσωπικό ID και κωδικό. Οι διανομείς δεν έχουν κοινό κωδικό. ${postgresPool ? 'Η βάση PostgreSQL είναι ενεργή.' : 'ΠΡΟΣΟΧΗ: η βάση είναι προσωρινή· οι λογαριασμοί μπορεί να χαθούν μετά από restart.'}`;
   }
   if (/κοστο|χρεω|κερδ|φορο|φπα|τιμ|price|fee/.test(q)) {
-    return `Η δοκιμαστική χρέωση Fair Delivery είναι ${fee}, με μηδενική χρέωση υπηρεσίας στον πελάτη και 0% ποσοστιαία προμήθεια. Η διανομή του καταστήματος είναι ${state.settings.shopDeliveryFee.toFixed(2).replace('.', ',')} ευρώ. Αυτά είναι μικτά ποσά, όχι καθαρό κέρδος. Για πραγματικούς φόρους, ΦΠΑ, παραστατικά και πληρωμές χρειάζεται λογιστική έγκριση πριν από εμπορική λειτουργία.`;
+    return `Η προτεινόμενη δοκιμαστική τιμολόγηση Fair Delivery είναι ${fee}. Η διανομή του καταστήματος είναι ${state.settings.shopDeliveryFee.toFixed(2).replace('.', ',')} ευρώ. Αυτά είναι μικτά ποσά, όχι καθαρό κέρδος. Για πραγματικούς φόρους, ΦΠΑ, παραστατικά και πληρωμές χρειάζεται λογιστική έγκριση πριν από εμπορική λειτουργία.`;
   }
   if (/παραγγελ|ακυρω|καταστημ|πελατ/.test(q)) {
     return 'Η δοκιμαστική παραγγελία πηγαίνει από τον πελάτη στο κατάστημα: νέα → αποδοχή → ετοιμασία → ανάθεση στον διανομέα του καταστήματος → παραλαβή → παράδοση. Σε ακύρωση απαιτείται καταγραφή της αιτίας και, πριν από πραγματικές πληρωμές, ξεκάθαρη πολιτική επιστροφών.';
@@ -973,6 +976,8 @@ async function handleApi(req, res, url) {
     }
     try{checkoutReliability.checkUniqueItems(lines);if(requestId)checkoutReliability.verifyQuote(body,lines,store.settings.shopDeliveryFee||0);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
     const subtotal = round2(lines.reduce((sum, line) => sum + line.lineTotal, 0));
+    // Server-side quote: never trust client-provided service fee or commission.
+    const pricingSnapshot = priceOrder(Math.round(subtotal * 100), Math.round((store.settings.shopDeliveryFee||0) * 100));
     let deliveryQuote;
     try{deliveryQuote=storeOperations.checkCheckout(state,store,{lat:deliveryLat,lng:deliveryLng},subtotal);}catch(e){return sendJson(res,e.statusCode||400,{error:e.message});}
     const order = {
@@ -980,9 +985,10 @@ async function handleApi(req, res, url) {
       ...payment, ...deliveryQuote, ...(requestId?{checkoutRequestId:requestId,checkoutDigest:requestDigest}:{}),customerId: customerAccount?.id || null, trackingPrivate: Boolean(customerAccount),
       customerName, customerPhone, deliveryAddress,
       deliveryLocation: { lat: deliveryLat, lng: deliveryLng },
-      serviceFee: 0, deliveryFee: round2(store.settings.shopDeliveryFee||0),
-      total: round2(subtotal + (store.settings.shopDeliveryFee||0)),
-      billingModel: 'shop-fixed-v1', shopFeeCents: FEE_CENTS, completedAt: null,
+      serviceFee: SERVICE_FEE_CENTS / 100, deliveryFee: round2(store.settings.shopDeliveryFee||0),
+      total: round2(pricingSnapshot.customerTotalCents / 100),
+      billingModel: 'shop-percent-v2', shopFeeCents: pricingSnapshot.commissionGrossCents,
+      pricingSnapshot, completedAt: null,
       status: 'new', createdAt: nowIso(), updatedAt: nowIso(),
       estimatedKm: null, badWeather: false, riderPayEstimate: null,
       assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
@@ -1062,7 +1068,7 @@ async function handleApi(req, res, url) {
     if (order.dispatchRequestedAt || ['delivered', 'cancelled'].includes(status)) {
       dispatchReadyOrders(state, order.storeId || 'default', order.updatedAt);
     }
-    if(status==='delivered' && order.billingModel==='shop-fixed-v1') order.completedAt=order.updatedAt;
+    if(status==='delivered' && ['shop-fixed-v1','shop-percent-v2'].includes(order.billingModel)) order.completedAt=order.updatedAt;
     if (['delivered', 'cancelled'].includes(status)) order.riderLocation = null;
     await persistState();
     return sendJson(res, 200, { order: privateOrder(order) });
@@ -1211,7 +1217,8 @@ async function handleApi(req, res, url) {
       grossValueToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal, 0)),
       shopsCommissionToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal * state.settings.shopCommissionPercent / 100, 0)),
       riderCountOnline: Object.values(state.riders).filter(r => r.online).length,
-      platformFeeToday
+      platformFeeToday,
+      pricingFinance: feeReport(state.orders,today)
     });
   }
 
@@ -1225,8 +1232,8 @@ async function handleApi(req, res, url) {
         const value = Number(body[key]);
         const max = key === 'shopCommissionPercent' ? 100 : 1000;
         if (!Number.isFinite(value) || value < 0 || value > max) return sendJson(res, 400, { error: `Μη έγκυρη τιμή για ${key}.` });
-        if (key === 'customerServiceFee' && value !== 0) return sendJson(res,400,{error:'Η χρέωση πελάτη παραμένει μηδενική.'});
-        if (key === 'shopCommissionPercent' && value !== 0) return sendJson(res, 400, { error: 'Στο πιλοτικό Fair Delivery η προμήθεια καταστήματος παραμένει 0%.' });
+        if (key === 'customerServiceFee' && value !== SERVICE_FEE_CENTS / 100) return sendJson(res,400,{error:'Η νέα χρέωση πελάτη είναι σταθερά 2,30 € (συμπεριλαμβανομένου ΦΠΑ υπηρεσίας).'});
+        if (key === 'shopCommissionPercent' && value !== COMMISSION_BPS / 100) return sendJson(res,400,{error:'Η νέα προμήθεια καταστήματος είναι 8% επί των προϊόντων, συν ΦΠΑ υπηρεσίας.'});
         settings[key] = round2(value);
       }
     }

@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let products = []; let cart = new Map(); let currentOrderId = null; let trackingTimer = null;
-let serviceFee = 0; let deliveryFee = 0; let submitting = false; let acceptingOrders=true; let selectedStore='default'; let storeLoading=false;
+let serviceFee = 2.30; let deliveryFee = 0; let submitting = false; let acceptingOrders=true; let selectedStore='default'; let storeLoading=false;
 let minOrder=0, storeRadius=null,storePoint=null;
 let pendingCheckout=null;
 let deliveryMap = null; let deliveryMarker = null; let trackingMap = null; let trackingLayers = [];
@@ -13,7 +13,7 @@ function renderCart() {
   }
   $('cart').innerHTML = rows.join('') || '<p class="hint">Το καλάθι είναι άδειο.</p>';
   $('subtotal').textContent = FD.money(subtotal);
-  $('serviceFee').textContent = FD.money(rows.length ? serviceFee : 0);
+  $('serviceFee').textContent = FD.money(serviceFee);
   $('deliveryFee').textContent = FD.money(rows.length ? deliveryFee : 0);
   $('total').textContent = FD.money(rows.length ? subtotal + serviceFee + deliveryFee : 0);
   $('menuCart').hidden = count === 0;
@@ -87,7 +87,7 @@ async function loadProducts() {
   }
   if($('productSearch'))$('productSearch').oninput=renderFilteredProducts;
   renderFilteredProducts();
-  $('feeNote').textContent = `Χωρίς χρέωση Fair Delivery στον πελάτη. Διανομή καταστήματος: ${FD.money(deliveryFee)}. Πληρωμή απευθείας στο κατάστημα στην πραγματική λειτουργία.`;
+  $('feeNote').textContent = `Χρέωση Fair Delivery: ${FD.money(serviceFee)} με ΦΠΑ υπηρεσίας, μόνο όταν υποβάλλεται παραγγελία. Μεταφορικά: ${FD.money(deliveryFee)}. Η πιλοτική έκδοση δεν εισπράττει πραγματικές πληρωμές.`;
 }
 $('placeOrder').addEventListener('click', async () => {
   if (submitting || storeLoading || !acceptingOrders || !checkCoverage()) return;

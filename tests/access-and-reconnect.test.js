@@ -69,7 +69,7 @@ test('assigned deliveries survive login and restart, with separate roles and pri
     await request('/api/orders', { method: 'POST', body: { ...checkout, deliveryLocation: { lat: null, lng: null } }, status: 400 });
     await request('/api/orders', { method: 'POST', body: { ...checkout, items: [null] }, status: 400 });
     const order = (await request('/api/orders', { method: 'POST', body: checkout, status: 201 })).data.order;
-    assert.equal(order.subtotal, 9.8); assert.equal(order.total, 9.8);
+    assert.equal(order.subtotal, 9.8); assert.equal(order.total, 12.1);
     const endpoint = `/api/orders/${order.id}`;
     await request(endpoint, { role: 'shop', method: 'PATCH', body: { status: 'delivered' }, status: 409 });
     await request(endpoint, { role: 'shop', method: 'PATCH', body: { status: 'accepted' } });
@@ -107,10 +107,10 @@ test('assigned deliveries survive login and restart, with separate roles and pri
     await request(endpoint, { role: 'rider', method: 'PATCH', body: { status: 'delivered', estimatedKm: 2.8, badWeather: true } });
     assert.equal((await request(endpoint)).data.order.riderLocation, null);
     await request('/api/settings', { role: 'admin', method: 'PATCH', body: { customerServiceFee: 1.25, badWeatherBonus: -1 }, status: 400 });
-    assert.equal((await request('/api/config')).data.settings.customerServiceFee, 0);
+    assert.equal((await request('/api/config')).data.settings.customerServiceFee, 2.3);
     await request('/api/shop/delivery-fee', { role: 'shop', method: 'POST', body: { deliveryFee: 2 } });
     const deliveryOrder = (await request('/api/orders', { method: 'POST', status: 201, body: checkout })).data.order;
-    assert.equal(deliveryOrder.total, 11.8);
+    assert.equal(deliveryOrder.total, 14.1);
     const deliveryEndpoint = `/api/orders/${deliveryOrder.id}`;
     await request(deliveryEndpoint, { role: 'shop', method: 'PATCH', body: { status: 'accepted' } });
     await request(deliveryEndpoint, { role: 'shop', method: 'PATCH', body: { status: 'ready' } });
@@ -131,7 +131,7 @@ test('assigned deliveries survive login and restart, with separate roles and pri
     const restored = await login('rider', { riderId: a.rider.id, code: reset.accessCode });
     assert.equal(restored.userId, a.rider.id);
     assert.equal((await request(endpoint)).data.order.status, 'delivered');
-    assert.equal((await request('/api/config')).data.settings.customerServiceFee, 0);
+    assert.equal((await request('/api/config')).data.settings.customerServiceFee, 2.3);
     assert.equal((await request('/api/config')).data.settings.shopDeliveryFee, 2);
     for (let i = 0; i < 19; i++) await request('/api/auth/login', { method: 'POST', body: { role: 'rider', riderId: 'missing', code: 'bad' }, status: 401 });
     await request('/api/auth/login', { method: 'POST', body: { role: 'rider', riderId: 'missing', code: 'bad' }, status: 429 });

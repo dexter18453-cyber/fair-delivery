@@ -60,7 +60,7 @@ test('multi-store API isolates menus and credentials, order routing and billing'
   assert.equal(replay.order.checkoutRequestId,undefined);assert.equal(replay.order.checkoutDigest,undefined);
   await call('/api/orders','customer',customer,'POST',{...attempt,customerName:'Different synthetic customer'},409);
   assert.equal((await call('/api/orders','shop',sa)).data.orders.length,1);
-  assert.equal(order.total,4);assert.equal(order.storeId,storeA);
+  assert.equal(order.total,6.3);assert.equal(order.storeId,storeA);
   assert.equal(order.etaMin,25);assert.equal(order.etaMax,50);
   const operationSettings=(await call('/api/shop/operations','shop',sa)).data.operations;
   await call('/api/shop/operations','shop',sa,'PATCH',{...operationSettings,minOrder:6,radiusKm:2,etaMin:15,etaMax:35});
@@ -78,9 +78,9 @@ test('multi-store API isolates menus and credentials, order routing and billing'
   await call('/api/orders/'+order.id,'shop',sb,'PATCH',{status:'accepted'},403);
   await call('/api/orders/'+order.id,'shop',sb,'GET',undefined,404);
   for(const status of ['accepted','ready','assigned','delivered'])await call('/api/orders/'+order.id,'shop',sa,'PATCH',{status,...(status==='assigned'?{storeDelivery:true}:{})});
-  assert.equal((await call('/api/shop/billing','shop',sa)).data.outstandingCents,100);
+  assert.equal((await call('/api/shop/billing','shop',sa)).data.outstandingCents,30);
   assert.equal((await call('/api/shop/billing?storeId='+storeA,'shop',sb)).data.outstandingCents,0);
-  assert.equal((await call('/api/shop/billing?storeId='+storeA,'admin',admin)).data.outstandingCents,100);
+  assert.equal((await call('/api/shop/billing?storeId='+storeA,'admin',admin)).data.outstandingCents,30);
   await call('/api/admin/shop-hold','admin',admin,'PATCH',{storeId:storeA,suspended:true,reason:'Synthetic overdue settlement',noticeConfirmed:true,adminCode:'demo'});
   assert.equal((await call('/api/config?storeId='+storeA)).data.acceptingOrders,false);
   assert.equal((await call('/api/config?storeId='+storeB)).data.acceptingOrders,true);
