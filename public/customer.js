@@ -87,7 +87,7 @@ async function loadProducts() {
   }
   if($('productSearch'))$('productSearch').oninput=renderFilteredProducts;
   renderFilteredProducts();
-  $('feeNote').textContent = `Χωρίς χρέωση Fair Delivery στον πελάτη. Διανομή καταστήματος: ${FD.money(deliveryFee)}. Πληρωμή απευθείας στο κατάστημα στην πραγματική λειτουργία.`;
+  $('feeNote').textContent = `Χρέωση Fair Delivery: ${FD.money(serviceFee)} με ΦΠΑ υπηρεσίας. Μεταφορικά: ${FD.money(deliveryFee)}. Η πιλοτική έκδοση δεν εισπράττει πραγματικές πληρωμές.`;
 }
 $('placeOrder').addEventListener('click', async () => {
   if (submitting || storeLoading || !acceptingOrders || !checkCoverage()) return;
