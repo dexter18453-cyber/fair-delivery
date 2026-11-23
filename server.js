@@ -25,6 +25,7 @@ const credentialChanges=new Set();
 let backupBusy=false;
 const { FEE_CENTS, athensDay, settlementSummary, recordSettlement }=require('./shop-billing');
 const { SERVICE_FEE_CENTS, COMMISSION_BPS, priceOrder } = require('./billing-pricing');
+const { feeReport } = require('./financial-report');
 const {paymentDetails,shopHold,initialPayout,visiblePayout}=require('./shop-controls');
 const { credentials: customerCredentials, publicAccount, newAccount, checkoutPayment } = require('./customer-accounts');
 const { validateApplication, evaluateApplication, pruneApplications } = require('./courier-onboarding');
@@ -1216,7 +1217,8 @@ async function handleApi(req, res, url) {
       grossValueToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal, 0)),
       shopsCommissionToday: round2(todayOrders.filter(o => o.status !== 'cancelled').reduce((s, o) => s + o.subtotal * state.settings.shopCommissionPercent / 100, 0)),
       riderCountOnline: Object.values(state.riders).filter(r => r.online).length,
-      platformFeeToday
+      platformFeeToday,
+      pricingFinance: feeReport(state.orders,today)
     });
   }
 
