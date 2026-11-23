@@ -174,6 +174,25 @@ async function createApp(options = {}) {
         const { shop, breakdown } = resolveBasket(state, data.shopId, data.items);
         return send(res, 200, { shopId: shop.id, pricing: breakdown });
       }
+      if (req.method === 'POST' && pathname === '/api/interest') {
+        const ip = 'interest:' + (req.socket.remoteAddress || 'unknown');
+        const current = Date.now();
+        const attempts = (rate.get(ip) || []).filter(t => t > current - 3600000);
+        if (attempts.length >= 5) throw BAD(429, 'Πολλές αιτήσεις από αυτή τη σύνδεση.');
+        attempts.push(current); rate.set(ip, attempts);
+        const data = await body(req);
+        const businessName = clean(data.businessName, 100);
+        const contactName = clean(data.contactName, 80);
+        const phone = clean(data.phone, 25);
+        const area = clean(data.area, 60);
+        if (businessName.length < 2 || contactName.length < 2 || area.length < 2 ||
+            !matches(phone, /^[+0-9() -]{9,25}$/)) throw BAD(400,'Συμπλήρωσε σωστά τα στοιχεία συνεργασίας.');
+        await store.transact(state => {
+          state.interests ||= [];
+          state.interests.push({ id: uuid(), businessName, contactName, phone, area, createdAt: now() });
+        });
+        return send(res, 201, { ok:true });
+      }
       if (req.method === 'POST' && pathname === '/api/orders') {
         if (!allowOrders) throw BAD(503, 'Οι πραγματικές παραγγελίες είναι απενεργοποιημένες για το πιλοτικό.');
         const ip = req.socket.remoteAddress || 'unknown';
@@ -193,13 +212,13 @@ async function createApp(options = {}) {
         if (!matches(data.idempotencyKey, /^[a-f0-9-]{36}$/)) throw BAD(400, 'Απαιτείται έγκυρο αναγνωριστικό παραγγελίας.');
         const fingerprint = HASH(JSON.stringify({ shopId:data.shopId, items:data.items, name, phone, address, notes }));
         const result = await store.transact(state => {
+          const trackingToken = crypto.createHmac('sha256', adminToken).update('tracking-v2:' + data.idempotencyKey).digest('base64url');
           const old = state.orders.find(o => o.idempotencyKey === data.idempotencyKey);
           if (old) {
             if (old.fingerprint !== fingerprint) throw BAD(409, 'Το αναγνωριστικό παραγγελίας χρησιμοποιήθηκε ήδη.');
-            return { id:old.id, trackingToken: null, duplicate: true, pricing:old.pricing };
+            return { id:old.id, trackingToken, duplicate: true, pricing:old.pricing };
           }
           const { shop, breakdown } = resolveBasket(state, data.shopId, data.items);
-          const trackingToken = crypto.randomBytes(24).toString('base64url');
           const order = { id:uuid(), idempotencyKey:data.idempotencyKey, fingerprint,
             shopId:shop.id, shopName:shop.name, createdAt:now(), updatedAt:now(),
             status:'new', customerName:name, customerPhone:phone, deliveryAddress:address,
@@ -233,6 +252,9 @@ async function createApp(options = {}) {
         }
         if (req.method === 'GET' && pathname === '/api/ops/me') {
           return send(res, 200, { role });
+        }
+        if (req.method === 'GET' && pathname === '/api/admin/interests') {
+          return send(res, 200, { interests: (state.interests || []).slice(-100).reverse() });
         }
         if (req.method === 'GET' && pathname === '/api/admin/summary') {
           return send(res, 200, summary(state));
