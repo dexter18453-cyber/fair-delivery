@@ -20,3 +20,31 @@ test('daily recorded settlement never double counts and later deliveries remain 
  assert.equal(settlementSummary(orders,[record],'default').outstandingCents,100);
  assert.equal(recordSettlement(orders,[record],'default','2026-11-18',100,now).amountCents,100);
 });
+
+const { priceOrder }=require('../billing-pricing');
+test('new 8% commission snapshots settle alongside historic 1 EUR charges without retroactive repricing',()=>{
+  const quote=priceOrder(2000,0);
+  assert.equal(quote.customerServiceFeeGrossCents,230);
+  assert.equal(quote.customerServiceFeeNetCents,185);
+  assert.equal(quote.customerServiceFeeVatCents,45);
+  assert.equal(quote.commissionNetCents,160);
+  assert.equal(quote.commissionVatCents,38);
+  assert.equal(quote.commissionGrossCents,198);
+  assert.equal(quote.customerTotalCents,2230);
+  const order=completed('new',{
+    billingModel:'shop-percent-v2',
+    shopFeeCents:quote.commissionGrossCents,pricingSnapshot:quote
+  });
+  const legacy=completed('legacy');
+  const other=completed('another',{status:'cancelled',billingModel:'shop-percent-v2',
+    shopFeeCents:quote.commissionGrossCents,pricingSnapshot:quote});
+  const all=[order,legacy,other];
+  const summary=settlementSummary(all,[],'default',athensDay(now));
+  assert.equal(summary.outstandingCents,298);
+  assert.equal(summary.days[0].completed,2);
+  assert.equal(summary.shopCommissionPercent,8);
+  const paid=recordSettlement(all,[],'default','2026-11-18',298,now);
+  assert.equal(paid.amountCents,298);
+  assert.equal(settlementSummary(all,[paid],'default',athensDay(now)).outstandingCents,0);
+  assert.throws(()=>recordSettlement(all,[paid],'default','2026-11-18',298,now),{statusCode:409});
+});
