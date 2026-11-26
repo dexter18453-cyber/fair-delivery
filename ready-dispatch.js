@@ -1,4 +1,5 @@
 'use strict';
+const {audit}=require('./order-support');
 
 // Match this shop's oldest waiting orders to free riders, least recently assigned first.
 function dispatchReadyOrders(state, storeId, timestamp) {
@@ -14,6 +15,7 @@ function dispatchReadyOrders(state, storeId, timestamp) {
     const rider = riders[i];
     Object.assign(waiting[i], { status: 'assigned', assignedRider: rider.id,
       assignedRiderName: rider.name, deliveryManagedByShop: false, updatedAt: timestamp });
+    audit(waiting[i],'assigned','system','oldest_waiting_order_least_recently_assigned_available_rider',timestamp);
     rider.lastDispatchAt = timestamp;
   }
 }
