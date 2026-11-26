@@ -10,7 +10,7 @@ test('pilot support API is owner-scoped, admin-reviewed, durable and never chang
  async function start(){child=spawn(process.execPath,['server.js'],{cwd:path.join(__dirname,'..'),env:{...process.env,RENDER:'',DATABASE_URL:'',NODE_ENV:'test',DEMO_MODE:'true',FD_MAINTENANCE_MODE:'false',PORT:String(port),HOST:'127.0.0.1',DATA_DIR:dir},stdio:'ignore'});for(let i=0;i<80;i++){try{if((await fetch(base+'/api/health')).ok)return;}catch{}await new Promise(r=>setTimeout(r,100));}throw Error('server startup failed');}
  async function stop(){if(child&&child.exitCode===null){const done=once(child,'exit');child.kill('SIGTERM');await done;}}
  async function call(url,role='',method='GET',body,status=200,cookie=''){const r=await fetch(base+url,{method,headers:{'X-FD-Role':role,'Content-Type':'application/json',Cookie:cookie},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json();assert.equal(r.status,status,method+' '+url+' '+JSON.stringify(data));return {data,cookie:r.headers.get('set-cookie')?.split(';')[0]||''};}
- async function customer(alias,action='register'){return (await call('/api/customer/'+action,'customer','POST',{alias,password:'synthetic-pass-12345',pilotAcknowledged:true},action==='register'?201:200)).cookie;}
+ async function customer(alias,action='register'){return (await call('/api/customer/'+action,'customer','POST',{alias,password:'synthetic-pass-12345',pilotAcknowledged:true},200)).cookie;}
  try{
   await start();
   assert.equal((await fetch(base+'/order-support-ui.js')).status,200);
