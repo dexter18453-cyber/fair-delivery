@@ -13,6 +13,8 @@ const fairAssistant=require('./fair-assistant');
 const { storeId:validStoreId, allStores, getStore, publicStore, newStore }=require('./stores');
 const storeOperations=require('./store-operations');
 const checkoutReliability=require('./checkout-reliability');
+const orderSupport=require('./order-support');
+const supportWrites=new Set();
 const checkoutPending=new Map();
 const accountRecovery=require('./account-recovery');
 const verifiedCustomers=require('./verified-customers');
@@ -136,6 +138,7 @@ function privateOrder(order) {
     deliveryAddress: order.deliveryAddress || '',
     deliveryManagedByShop: Boolean(order.deliveryManagedByShop),
     waitingForRider: order.status === 'ready' && Boolean(order.dispatchRequestedAt),
+    operationalHistory: order.operationalHistory || [], operationalTiming: orderSupport.timing(order),
     assignedRider: order.assignedRider || null,
     assignedRiderName: rider?.name || order.assignedRiderName || null
   };
@@ -993,10 +996,51 @@ async function handleApi(req, res, url) {
       estimatedKm: null, badWeather: false, riderPayEstimate: null,
       assignedRider: null, assignedRiderName: null, riderLocation: null, deliveryManagedByShop: false
     };
+    orderSupport.audit(order,'new','customer','checkout',order.createdAt);
     state.orders.push(order);
     const saved=persistState();if(pendingKey)checkoutPending.set(pendingKey,{digest:requestDigest,saved});
     try{await saved;}catch(e){state.orders=state.orders.filter(o=>o.id!==order.id);return sendJson(res,503,{error:'Η αποθήκευση δεν επιβεβαιώθηκε. Δοκίμασε ξανά.'});}finally{if(pendingKey)checkoutPending.delete(pendingKey);}
     return sendJson(res, 201, { order: publicOrder(order), trackingUrl: `/app/customer/?order=${encodeURIComponent(order.id)}` });
+  }
+
+  // Pilot support: order owner only; no free text or financial transaction.
+  const supportPath=pathname.match(/^\/api\/customer\/orders\/([0-9a-f-]+)\/support$/i);
+  if(supportPath&&['GET','POST'].includes(method)){
+    const session=requireRole(req,res,['customer']);if(!session)return;
+    if(!state.customers[session.userId])return sendJson(res,401,{error:'Ο λογαριασμός δεν είναι ενεργός.'});
+    const order=orderSupport.ownOrder(state.orders,supportPath[1],session.userId);
+    if(method==='GET')return sendJson(res,200,{tickets:orderSupport.tickets(order)});
+    const body=await readJson(req,1024);
+    if(!state.customers[session.userId]||order.customerId!==session.userId)return sendJson(res,404,{error:'Η παραγγελία δεν βρέθηκε.'});
+    if(!rateLimit(requestWindows,'support:'+session.userId,12,60_000))return sendJson(res,429,{error:'Πολλές προσπάθειες.'});
+    if(supportWrites.has(order.id))return sendJson(res,409,{error:'Εκκρεμεί αποθήκευση. Δοκίμασε ξανά.'});
+    const result=orderSupport.createTicket(order,body.category,nowIso());
+    if(!result.created)return sendJson(res,200,result);
+    const previous=order.supportTickets;
+    supportWrites.add(order.id);
+    order.supportTickets=[...orderSupport.tickets(order),result.ticket];
+    try{await persistState();}catch(e){if(previous===undefined)delete order.supportTickets;else order.supportTickets=previous;throw e;}finally{supportWrites.delete(order.id);}
+    return sendJson(res,201,result);
+  }
+  if(pathname==='/api/admin/order-support'&&method==='GET'){
+    const session=requireRole(req,res,['admin']);if(!session)return;
+    const records=state.orders.flatMap(o=>orderSupport.tickets(o).map(t=>({orderId:o.id,storeId:o.storeId||'default',...t})));
+    records.sort((a,b)=>(a.status==='open'?0:1)-(b.status==='open'?0:1)||b.createdAt.localeCompare(a.createdAt));
+    return sendJson(res,200,{tickets:records.slice(0,200),total:records.length});
+  }
+  const supportReview=pathname.match(/^\/api\/admin\/order-support\/([0-9a-f-]+)\/([0-9a-f-]+)$/i);
+  if(supportReview&&method==='PATCH'){
+    const session=requireRole(req,res,['admin']);if(!session)return;
+    const body=await readJson(req,1024);
+    const order=state.orders.find(o=>o.id===supportReview[1]);
+    const ticket=order&&orderSupport.tickets(order).find(t=>t.id===supportReview[2]);
+    if(!ticket)return sendJson(res,404,{error:'Το αίτημα δεν βρέθηκε.'});
+    if(supportWrites.has(order.id))return sendJson(res,409,{error:'Εκκρεμεί αποθήκευση.'});
+    const next=orderSupport.resolveTicket(ticket,body.decision,nowIso());
+    const previous=order.supportTickets;
+    supportWrites.add(order.id);order.supportTickets=previous.map(t=>t.id===ticket.id?next:t);
+    try{await persistState();}catch(e){order.supportTickets=previous;throw e;}finally{supportWrites.delete(order.id);}
+    return sendJson(res,200,{ticket:next});
   }
 
   const publicTracking = pathname.match(/^\/api\/orders\/([0-9a-f-]+)$/i);
@@ -1062,6 +1106,7 @@ async function handleApi(req, res, url) {
       order.riderPayEstimate = round2(state.settings.riderBaseAmount + order.estimatedKm * state.settings.riderPerKm + (order.badWeather ? state.settings.badWeatherBonus : 0));
     }
     order.status = status; order.updatedAt = nowIso();
+    orderSupport.audit(order,status,session.role,status==='assigned'?(shopManagedDelivery?'shop_self_delivery':'manual_assignment'):'status_transition',order.updatedAt);
     if (session.role === 'shop' && status === 'ready' && body.autoAssign === true) {
       order.dispatchRequestedAt = order.updatedAt;
     }
@@ -1494,7 +1539,7 @@ async function serveRoleApp(req, res, url) {
 }
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.xml': 'application/xml; charset=utf-8', '.txt': 'text/plain; charset=utf-8' };
-const PUBLIC_FILES = new Set(['google36c42afe351a4083.html', 'discover.html', 'robots.txt', 'sitemap.xml', 'index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/pita.webp', 'assets/neighborhood.webp', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js', 'courier-interest.js', 'courier-qualification.html', 'customer-account.js']);
+const PUBLIC_FILES = new Set(['google36c42afe351a4083.html', 'discover.html', 'robots.txt', 'sitemap.xml', 'index.html', 'customer-app.html', 'shop-app.html', 'Rider-App.html', 'admin.js', 'customer.js', 'shop.js', 'rider.js', 'assets/app.css', 'assets/common.js', 'assets/pwa.js', 'assets/v2.css', 'assets/pita.webp', 'assets/neighborhood.webp', 'assets/shell.js', 'courier-apply.html', 'courier-apply.js', 'courier-interest.js', 'courier-qualification.html', 'customer-account.js', 'order-support-ui.js']);
 async function serveStatic(req, res, url) {
   let requested = decodeURIComponent(url.pathname === '/' ? '/discover.html' : url.pathname).replace(/^\/+/, '');
   if (!PUBLIC_FILES.has(requested)) return sendJson(res, 404, { error: 'Η σελίδα δεν βρέθηκε.' });
