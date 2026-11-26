@@ -1,0 +1,54 @@
+name: Fair Delivery pilot verification
+on:
+  push:
+    branches:
+      - fix/fair-delivery-pilot-1-3
+  workflow_dispatch:
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Check live pilot without changing orders or accounts
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const base = 'https://fair-delivery.onrender.com';
+          async function get(path) {
+            let last;
+            for (let attempt = 0; attempt < 12; attempt++) {
+              try {
+                const r = await fetch(base + path, {signal: AbortSignal.timeout(15000)});
+                if (!r.ok) throw new Error(path + ' HTTP ' + r.status);
+                return r;
+              } catch (e) {
+                last = e;
+                await new Promise(done => setTimeout(done, 5000));
+              }
+            }
+            throw last;
+          }
+          const health = await (await get('/api/health')).json();
+          assert.equal(health.version, '1.3.0', 'Wrong live application version');
+          assert.equal(health.storage, 'postgres', 'PostgreSQL is not active');
+          assert.equal(health.ok, true);
+          const config = await (await get('/api/config')).json();
+          assert.equal(config.settings.customerServiceFee, 2.30);
+          assert.equal(config.settings.shopOrderFee, 0);
+          assert.equal(config.settings.shopCommissionPercent, 8);
+          const products = await (await get('/api/products')).json();
+          assert.ok(Array.isArray(products.products));
+          for (const name of ['/', '/customer-app.html', '/shop-app.html', '/Rider-App.html']) {
+            const response = await get(name);
+            const html = await response.text();
+            assert.match(html, /Fair Delivery/);
+          }
+          console.log('LIVE PILOT PASS: version 1.3.0, PostgreSQL, €2.30 customer fee, 8% shop commission, no legacy fixed fee for new orders, pages and products');
+          NODE
